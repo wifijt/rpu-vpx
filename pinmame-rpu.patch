@@ -74,7 +74,7 @@ index 907b58301..f261ac044 100644
  const struct GameDriver *test_drivers[] = { 0 };
 diff --git a/src/wpc/rpu.c b/src/wpc/rpu.c
 new file mode 100644
-index 000000000..a6d31bf62
+index 000000000..db9cf25c4
 --- /dev/null
 +++ b/src/wpc/rpu.c
 @@ -0,0 +1,501 @@
@@ -456,7 +456,7 @@ index 000000000..a6d31bf62
 +  m->driver_init();                                             /* its core_gameData */
 +  rpu_common_init(name);
 +  rpu.noBoard = Machine->gamedrv->drv != construct_rpu_s6S;
-+  if (rpu.noBoard) printf("RPU: %s: %s's ROMs aren't in the roms folder: WAV sounds only\n", name, m->name);
++  if (rpu.noBoard) fprintf(stderr, "RPU: %s: %s's ROMs aren't in the roms folder: WAV sounds only\n", name, m->name);
 +}
 +ROM_START(rpu_s6)
 +  NORMALREGION(0x10000, REGION_CPU1)
