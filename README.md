@@ -35,6 +35,8 @@ Use your own.
 2. Put `rpu_<game>.dll` in the `rpu` folder beside `VPinMAME64.dll` (Mac: `~/.pinmame/rpu/`), with your WAVs in
    `rpu\<game>\` and, if needed, `rpu_<game>.txt`.
 3. In the table's script, set `cGameName = "rpu_<game>"`. PinMAME lists every plugin in the folder when it starts.
+   On Windows, the first run of each game shows VPinMAME's own questions (About, then its ROM licence notice): answer
+   them once and they don't come back.
 
 Numbering: PinMAME counts switches, coils and lamps from 1, RPU from 0, so RPU switch 5 is PinMAME switch 6.
 
