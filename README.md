@@ -20,9 +20,9 @@ Use your own.
 
 ## What you need
 
-- **Windows:** VPX 10.8 (64-bit), the DirectX June 2010 runtime (Microsoft's `directx_Jun2010_redist.exe`; VPX's full
-  installer includes it, the Minimal zip doesn't, and without it VPX quits at once), and this kit's `VPinMAME64.dll`
-  (run `Setup64.exe` to register it). To build your
+- **Windows:** VPX 10.8 (64-bit), the DirectX June 2010 runtime (Microsoft's `directx_Jun2010_redist.exe`) and the
+  Visual C++ 2015-2022 x64 redistributable. VPX's full installer brings both; its Minimal zip doesn't, and without
+  them VPX quits at once. Then this kit's `VPinMAME64.dll` (run `Setup64.exe` to register it). To build your
   game: Python 3, MinGW-w64 g++ (WinLibs) and [rpu-sim](https://github.com/wifijt/rpu-sim).
 - **Mac:** VPX Standalone, then `tools/install-vpx-macos.sh <PINMAME_SHA>` puts the RPU PinMAME into it. To build:
   Python 3, clang (Xcode command-line tools) and rpu-sim.
