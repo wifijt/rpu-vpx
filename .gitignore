@@ -1,0 +1,7 @@
+pinmame/
+pinmame-vpx/
+build/
+out/
+*.dylib
+*.dll
+*.so

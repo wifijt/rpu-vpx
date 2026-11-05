@@ -1,0 +1,628 @@
+diff --git a/cmake/libpinmame/CMakeLists.txt b/cmake/libpinmame/CMakeLists.txt
+index 259fb7475..fb36721df 100644
+--- a/cmake/libpinmame/CMakeLists.txt
++++ b/cmake/libpinmame/CMakeLists.txt
+@@ -561,6 +561,7 @@ set(PINMAME_SOURCES
+    src/wpc/s4.h
+    src/wpc/s4games.c
+    src/wpc/s6.c
++   src/wpc/rpu.c
+    src/wpc/s6.h
+    src/wpc/s6games.c
+    src/wpc/s7.c
+diff --git a/cmake/vpinmame/CMakeLists_win-x64.txt b/cmake/vpinmame/CMakeLists_win-x64.txt
+index 229579505..4d7c1b5bb 100644
+--- a/cmake/vpinmame/CMakeLists_win-x64.txt
++++ b/cmake/vpinmame/CMakeLists_win-x64.txt
+@@ -454,6 +454,7 @@ add_library(vpinmame SHARED
+    src/wpc/s4.h
+    src/wpc/s4games.c
+    src/wpc/s6.c
++   src/wpc/rpu.c
+    src/wpc/s6.h
+    src/wpc/s6games.c
+    src/wpc/s7.c
+diff --git a/cmake/vpinmame/CMakeLists_win-x86.txt b/cmake/vpinmame/CMakeLists_win-x86.txt
+index 7a4858d4f..40e9e76cd 100644
+--- a/cmake/vpinmame/CMakeLists_win-x86.txt
++++ b/cmake/vpinmame/CMakeLists_win-x86.txt
+@@ -457,6 +457,7 @@ add_library(vpinmame SHARED
+    src/wpc/s4.h
+    src/wpc/s4games.c
+    src/wpc/s6.c
++   src/wpc/rpu.c
+    src/wpc/s6.h
+    src/wpc/s6games.c
+    src/wpc/s7.c
+diff --git a/src/driver.h b/src/driver.h
+index 03291b909..6e635e01f 100644
+--- a/src/driver.h
++++ b/src/driver.h
+@@ -614,4 +614,8 @@ const struct GameDriver driver_##NAME =         \
+ ***************************************************************************/
+ 
+ extern struct GameDriver *drivers[];
++#define RPU_SPARE_DRIVERS 64
++#define RPU_SPARE_DRIVERS_8 0,0,0,0,0,0,0,0,
++#define RPU_SPARE_DRIVERS_LIST RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 \
++  RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8
+ extern const struct GameDriver *test_drivers[];
+diff --git a/src/wpc/driver.c b/src/wpc/driver.c
+index 907b58301..f261ac044 100644
+--- a/src/wpc/driver.c
++++ b/src/wpc/driver.c
+@@ -14,6 +14,7 @@ const struct GameDriver driver_0 = {
+ #  define DRIVERNV(name) &driver_##name,
+ struct GameDriver *drivers[] = {
+ #  include "driver.c"
++RPU_SPARE_DRIVERS_LIST /* rpu.c adds a game per plugin here */
+ 0 /* end of array */
+ };
+ const struct GameDriver *test_drivers[] = { 0 };
+diff --git a/src/wpc/rpu.c b/src/wpc/rpu.c
+new file mode 100644
+index 000000000..a6d31bf62
+--- /dev/null
++++ b/src/wpc/rpu.c
+@@ -0,0 +1,501 @@
++// license:BSD-3-Clause
++/************************************************************************************************
++  RPU: RetroPinUpgrade games on the machines they were written for.
++
++  RPU replaces a machine's game program with an Arduino one (github.com/RetroPinUpgrade). Here the
++  RPU game, built natively as a plugin (rpu-pinmame, GPL-3.0, loaded at run time), takes the place of
++  the original CPU: it reads the table's switches and drives the lamps, coils and displays through
++  PinMAME's core, as the original game did. The machine's own sound board is still emulated, from the
++  machine's ROM set, and gets the game's sound commands on the same lines; the game's WAV Trigger
++  sounds play on a channel of their own, mixed with it.
++
++  The plugin and the WAVs live in <pinmame>/rpu/: rpu_<game>.dylib|.so|.dll and <game>/NNN_name.wav.
++  RPU_PLUGIN_DIR overrides. Every plugin found there at start-up is a game named rpu_<game>, so a new game
++  needs no change here: the table's script just says rpu_<game>. An optional rpu_<game>.txt beside the plugin
++  has one setting a line:
++    digits 7        the display the table was made for, 6 or 7 (Bally; default: the game's own)
++    rom scrpn_l1    the machine (System 6). The game takes that game's playfield settings, and if its ROM set
++                    is in the roms folder beside the rpu folder, its sound board too. Without the ROMs it's
++                    WAV only. No rom line: Bally -35, WAV only.
++
++  Numbers: RPU's switches, lamps and coils count from 0, PinMAME's from 1. Bally -35 lamps: RPU's lamp n
++  is address n/4, data bit n%4; PinMAME's is address + 16 * bit, + 1.
++
++  Machines: Williams System 6 (the sound command on coils 9-13) and Bally -35 (the high nibble of the
++  coil port: coin lockout on coil 18, flippers on 19; no sound board yet).
++************************************************************************************************/
++#include "driver.h"
++#include "cpu/m6800/m6800.h"
++#include "core.h"
++#include "sndbrd.h"
++#include "wmssnd.h"
++#include "s6.h"
++#include "by35.h"
++#include "rpu_plugin.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#ifdef _WIN32
++#include <windows.h>
++#else
++#include <dlfcn.h>
++#endif
++
++#define RPU_TICK_HZ   1000      /* the game's loop() runs once per emulated millisecond */
++#define RPU_EEPROM    4096
++#define RPU_SOUND_MS  8         /* a sound command stays on the lines this long, then they go idle */
++
++static struct {
++  const rpu_plugin_api *g;
++  const char *plugin;           /* "scorpion2022" */
++  int by35;                     /* Bally -35, not Williams System 6 */
++  int noBoard;                  /* no sound board: the machine's ROMs aren't here */
++  int started;
++  UINT8 eeprom[RPU_EEPROM];
++  UINT8 sw[CORE_MAXSWCOL * 8];  /* last switch states sent to the game */
++  UINT8 portB;                  /* coils 9-16, which carry the sound commands on System 6 */
++  int lastB;                    /* what the sound board last saw (-1: nothing yet) */
++  int soundLeft;
++  int stream;
++} rpu;
++
++/*-- the plugin --*/
++static void rpu_dir(char *out, size_t n) {
++  const char *d = getenv("RPU_PLUGIN_DIR");
++  if (d) { snprintf(out, n, "%s", d); return; }
++#ifdef _WIN32
++  /* the rpu folder beside VPinMAME's own DLL: VPX's working folder is its own, not VPinMAME's */
++  HMODULE self = NULL;
++  char *slash;
++  if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                         (LPCSTR)rpu_dir, &self) && GetModuleFileNameA(self, out, (DWORD)n) && (slash = strrchr(out, '\\'))) {
++    snprintf(slash + 1, n - (size_t)(slash + 1 - out), "rpu");
++    return;
++  }
++  snprintf(out, n, "rpu");
++#else
++  snprintf(out, n, "%s/.pinmame/rpu", getenv("HOME") ? getenv("HOME") : ".");
++#endif
++}
++
++static const rpu_plugin_api *rpu_load(const char *name) {
++  char dir[512], path[700];
++  rpu_dir(dir, sizeof dir);
++#ifdef _WIN32
++  snprintf(path, sizeof path, "%s\\rpu_%s.dll", dir, name);
++  HMODULE h = LoadLibraryA(path);
++  rpu_plugin_get_fn get = h ? (rpu_plugin_get_fn)GetProcAddress(h, "rpu_plugin_get") : NULL;
++#else
++#  ifdef __APPLE__
++  snprintf(path, sizeof path, "%s/rpu_%s.dylib", dir, name);
++#  else
++  snprintf(path, sizeof path, "%s/rpu_%s.so", dir, name);
++#  endif
++  void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++  rpu_plugin_get_fn get = h ? (rpu_plugin_get_fn)dlsym(h, "rpu_plugin_get") : NULL;
++#endif
++  if (!get) { logerror("RPU: can't load %s\n", path); fprintf(stderr, "RPU: can't load %s\n", path); return NULL; }
++  const rpu_plugin_api *g = get();
++  if (!g || g->version != RPU_PLUGIN_VERSION) { fprintf(stderr, "RPU: %s is plugin version %d, not %d\n", path, g ? g->version : 0, RPU_PLUGIN_VERSION); return NULL; }
++  return g;
++}
++
++static void rpu_start_game(void) {
++  char dir[512], sounds[700];
++  rpu.started = 1;
++  if (!rpu.g) return;
++  rpu_dir(dir, sizeof dir);
++  snprintf(sounds, sizeof sounds, "%s/%s", dir, rpu.plugin);
++  rpu.g->start(sounds, rpu.eeprom, RPU_EEPROM);
++}
++
++/*-- every emulated millisecond: switches in, the game's loop(), the sound lines --*/
++static INTERRUPT_GEN(rpu_tick) {
++  int n;
++  if (!rpu.g) return;
++  if (!rpu.started) rpu_start_game();
++  for (n = 1; n <= 64; n++) {
++    int on = core_getSw(n) ? 1 : 0;
++    if (on != rpu.sw[n]) {
++      rpu.sw[n] = on;
++      rpu.g->set_switch(n - 1, on);
++      if (getenv("RPU_SWLOG")) fprintf(stderr, "RPU switch %d %s\n", n, on ? "closed" : "open");
++    }
++  }
++  rpu.g->run_ms(1);
++  /* RPU_AUTOTEST: a bench check with no hands: a coin at 8 s, Start at 10 s, and what goes to the host */
++  if (getenv("RPU_AUTOTEST")) {
++    static int ms = 0;
++    ms++;
++    int coin = rpu.by35 ? 10 : 4, start = rpu.by35 ? 6 : 3;
++    if (!rpu.by35 && ms == 8000) core_setSw(6, 1);
++    if (!rpu.by35 && ms == 8200) core_setSw(6, 0);
++    if (ms == 8400) core_setSw(coin, 1);
++    if (ms == 8600) core_setSw(coin, 0);
++    if (ms == 10000) core_setSw(start, 1);
++    if (ms == 10200) core_setSw(start, 0);
++    if (ms % 2000 == 0) {
++      int l, lit = 0;
++      for (l = 0; l < 64; l++) lit += (coreGlobals.lampMatrix[l / 8] >> (l % 8)) & 1;
++      fprintf(stderr, "RPU autotest %5d ms: lamps lit %d, credits %d, ball %d, coils %08x\n", ms, lit, rpu.g->credits(),
++              rpu.g->ball_in_play(), (unsigned)coreGlobals.solenoids);
++    }
++  }
++
++  /* System 6: the sound command is on coils 9-13 (RPU's sound number / 256), with coils 14-16 */
++  if (!rpu.by35) {
++    UINT8 b = (UINT8)(rpu.g->solenoids() >> 8);
++    if (rpu.soundLeft > 0) rpu.soundLeft--;
++    else {
++      int s = rpu.g->sound_command();
++      if (s >= 0) { rpu.soundLeft = RPU_SOUND_MS; rpu.portB = (UINT8)(s >> 8); }
++      else rpu.portB = 0;
++    }
++    b |= rpu.portB;
++    if (b != rpu.lastB) { rpu.lastB = b; if (!rpu.noBoard) sndbrd_0_data_w(0, ~b); }   /* only changes, as the PIA would */
++  }
++}
++
++/*-- every frame, Bally -35: 60 lamps, coils 1-15 one at a time, 18-20 held, 6-digit displays --*/
++static void rpu_by35_vblank(void) {
++  int l, d, p, flip = rpu.g->flippers_enabled();
++  UINT32 sol;
++  memset((void *)coreGlobals.lampMatrix, 0, sizeof coreGlobals.lampMatrix);
++  for (l = 0; l < 60; l++)
++    if (rpu.g->lamp(l)) {
++      int n = l / 4 + 16 * (l % 4);
++      coreGlobals.lampMatrix[n / 8] |= 1 << (n % 8);
++    }
++
++  sol = rpu.g->solenoids() & 0x7fff;
++  if (flip) sol |= 1 << 18;                                     /* coil 19: the flipper relay */
++  coreGlobals.solenoids = sol;
++  coreGlobals.pulsedSolState = sol;
++
++  /* the player displays: the right of 0-7, 8-15, 16-23, 24-31 (6 or 7 digits); credits 35-36, ball in play 38-39 */
++  {
++    int digits = rpu.g->display_digits();
++    for (d = 0; d < 4; d++)
++      for (p = 0; p < digits; p++) {
++        int v = rpu.g->display_digit(d, p);
++        coreGlobals.segments[d * 8 + 8 - digits + p].w = v < 0 ? 0 : core_bcd2seg7[v];
++      }
++  }
++  {
++    int c = rpu.g->credits(), b = rpu.g->ball_in_play();
++    coreGlobals.segments[35].w = c < 10 ? 0 : core_bcd2seg7[(c / 10) % 10];
++    coreGlobals.segments[36].w = c < 0 ? 0 : core_bcd2seg7[c % 10];
++    coreGlobals.segments[38].w = b < 10 ? 0 : core_bcd2seg7[(b / 10) % 10];
++    coreGlobals.segments[39].w = b < 0 ? 0 : core_bcd2seg7[b % 10];
++  }
++  core_updateSw(flip);
++}
++
++/*-- every frame: the game's lamps, coils and displays to the core --*/
++static INTERRUPT_GEN(rpu_vblank) {
++  int l, d, p;
++  UINT32 sol;
++  if (!rpu.g || !rpu.started) { core_updateSw(0); return; }
++
++  if (rpu.by35) { rpu_by35_vblank(); return; }
++
++  for (l = 0; l < 64; l++) {
++    UINT8 bit = 1 << (l % 8);
++    if (rpu.g->lamp(l)) coreGlobals.lampMatrix[l / 8] |= bit; else coreGlobals.lampMatrix[l / 8] &= ~bit;
++  }
++
++  sol = rpu.g->solenoids();
++  if (rpu.g->flippers_enabled()) sol |= CORE_SOLBIT(CORE_SSFLIPENSOL);
++  coreGlobals.solenoids = sol;
++  coreGlobals.pulsedSolState = sol;
++
++  /* the player displays: 0-5, 8-13, 20-25, 28-33 (System 6's layout), 6 digits each */
++  {
++    static const int start[4] = {0, 8, 20, 28};
++    int digits = rpu.g->display_digits();
++    for (d = 0; d < 4; d++)
++      for (p = 0; p < 6; p++) {
++        int v = rpu.g->display_digit(d, digits - 6 + p);
++        coreGlobals.segments[start[d] + p].w = v < 0 ? 0 : core_bcd2seg7[v];
++      }
++  }
++  /* the credit and ball-in-play displays: two digits each */
++  {
++    int c = rpu.g->credits(), b = rpu.g->ball_in_play();
++    coreGlobals.segments[14].w = c < 0 ? 0 : core_bcd2seg7[(c / 10) % 10];
++    coreGlobals.segments[15].w = c < 0 ? 0 : core_bcd2seg7[c % 10];
++    coreGlobals.segments[6].w = b < 0 ? 0 : core_bcd2seg7[(b / 10) % 10];
++    coreGlobals.segments[7].w = b < 0 ? 0 : core_bcd2seg7[b % 10];
++  }
++  core_updateSw(rpu.g->flippers_enabled());
++}
++
++static SWITCH_UPDATE(rpu) {
++  if (inports) {
++    coreGlobals.swMatrix[1] = inports[S6_COMINPORT] & 0x00ff;
++    coreGlobals.swMatrix[0] = (inports[S6_COMINPORT] & 0xff00) >> 8;
++  }
++}
++
++static SWITCH_UPDATE(rpu_by35) {
++  if (inports) {
++    CORE_SETKEYSW(inports[BY35_COMINPORT],    0x07, 0);
++    CORE_SETKEYSW(inports[BY35_COMINPORT],    0x60, 1);
++    CORE_SETKEYSW(inports[BY35_COMINPORT]>>8, 0x87, 2);
++  }
++}
++
++/*-- the WAV Trigger: the plugin mixes the game's WAVs --*/
++static void rpu_wav_update(int param, INT16 **buffer, int length) {
++  static INT16 mix[2 * 4096];
++  int i;
++  if (!rpu.g || !rpu.started || length > 4096) {
++    memset(buffer[0], 0, length * sizeof(INT16)); memset(buffer[1], 0, length * sizeof(INT16)); return;
++  }
++  rpu.g->render_audio(mix, length, Machine->sample_rate);
++  for (i = 0; i < length; i++) { buffer[0][i] = mix[2 * i]; buffer[1][i] = mix[2 * i + 1]; }
++}
++
++static int rpu_wav_start(const struct MachineSound *msound) {
++  static const char *names[2] = {"RPU WAV L", "RPU WAV R"};
++  static const int levels[2] = {MIXER(60, MIXER_PAN_LEFT), MIXER(60, MIXER_PAN_RIGHT)};   /* headroom: music plus the sound board clipped at 100 */
++  rpu.stream = stream_init_multi(2, names, levels, Machine->sample_rate, 0, rpu_wav_update);
++  return 0;
++}
++static void rpu_wav_stop(void) {}
++static struct CustomSound_interface rpu_wavInt = {rpu_wav_start, rpu_wav_stop};
++
++/*-- machine --*/
++static void rpu_common_init(const char *plugin) {
++  UINT8 *rom = memory_region(REGION_CPU1);
++  memset(&rpu, 0, sizeof rpu);
++  memset(rpu.eeprom, 0xff, sizeof rpu.eeprom);
++  rpu.plugin = plugin;
++  rpu.lastB = -1;
++  /* the original CPU's place: a 6808 waiting in a loop, to time the game */
++  rom[0xfffe] = 0xf0; rom[0xffff] = 0x00;
++  rom[0xf000] = 0x20; rom[0xf001] = 0xfe;                       /* BRA * */
++  rpu.g = rpu_load(plugin);
++}
++
++static MACHINE_INIT(rpu_s6) { sndbrd_0_init(core_gameData->hw.soundBoard ? core_gameData->hw.soundBoard : SNDBRD_S67S, 1, NULL, NULL, NULL); }
++static MACHINE_STOP(rpu_s6) { sndbrd_0_exit(); }
++
++static NVRAM_HANDLER(rpu) {
++  if (read_or_write && rpu.g && rpu.started) {                   /* save: the game's EEPROM as it is */
++    int size, dirty;
++    const UINT8 *e = rpu.g->eeprom(&size, &dirty);
++    memcpy(rpu.eeprom, e, size < RPU_EEPROM ? size : RPU_EEPROM);
++  }
++  core_nvram(file, read_or_write, rpu.eeprom, RPU_EEPROM, 0xff);
++}
++
++static MEMORY_READ_START(rpu_readmem)
++  { 0x0000, 0xffff, MRA_ROM },
++MEMORY_END
++static MEMORY_WRITE_START(rpu_writemem)
++  { 0x0000, 0xffff, MWA_NOP },
++MEMORY_END
++
++static MACHINE_INIT(rpu_by35) {}
++static MACHINE_STOP(rpu_by35) {}
++
++/* Bally -35 with the WAV Trigger only: no sound board, so the game needs no ROMs at all */
++MACHINE_DRIVER_START(rpu_by35)
++  MDRV_IMPORT_FROM(PinMAME)
++  MDRV_CORE_INIT_RESET_STOP(rpu_by35,NULL,rpu_by35)
++  MDRV_CPU_ADD(M6808, 3579545./4.)
++  MDRV_CPU_MEMORY(rpu_readmem, rpu_writemem)
++  MDRV_CPU_VBLANK_INT(rpu_vblank, 1)
++  MDRV_CPU_PERIODIC_INT(rpu_tick, RPU_TICK_HZ)
++  MDRV_NVRAM_HANDLER(rpu)
++  MDRV_DIPS(32)
++  MDRV_SWITCH_UPDATE(rpu_by35)
++  MDRV_SOUND_ADD(CUSTOM, rpu_wavInt)
++MACHINE_DRIVER_END
++
++/* System 6 with its ROMs missing: the WAV Trigger only */
++MACHINE_DRIVER_START(rpu_s6N)
++  MDRV_IMPORT_FROM(PinMAME)
++  MDRV_CORE_INIT_RESET_STOP(rpu_by35,NULL,rpu_by35)
++  MDRV_CPU_ADD(M6808, 3579545./4.)
++  MDRV_CPU_MEMORY(rpu_readmem, rpu_writemem)
++  MDRV_CPU_VBLANK_INT(rpu_vblank, 1)
++  MDRV_CPU_PERIODIC_INT(rpu_tick, RPU_TICK_HZ)
++  MDRV_NVRAM_HANDLER(rpu)
++  MDRV_DIPS(8+16)
++  MDRV_SWITCH_UPDATE(rpu)
++  MDRV_SOUND_ADD(CUSTOM, rpu_wavInt)
++MACHINE_DRIVER_END
++
++MACHINE_DRIVER_START(rpu_s6S)
++  MDRV_IMPORT_FROM(PinMAME)
++  MDRV_CORE_INIT_RESET_STOP(rpu_s6,NULL,rpu_s6)
++  MDRV_CPU_ADD(M6808, 3579545./4.)
++  MDRV_CPU_MEMORY(rpu_readmem, rpu_writemem)
++  MDRV_CPU_VBLANK_INT(rpu_vblank, 1)
++  MDRV_CPU_PERIODIC_INT(rpu_tick, RPU_TICK_HZ)
++  MDRV_NVRAM_HANDLER(rpu)
++  MDRV_DIPS(8+16)
++  MDRV_SWITCH_UPDATE(rpu)
++  MDRV_IMPORT_FROM(wmssnd_s67s)
++  MDRV_SOUND_ADD(CUSTOM, rpu_wavInt)
++MACHINE_DRIVER_END
++
++/************************************************************************************************
++  Games
++************************************************************************************************/
++/*-- a setting from rpu_<game>.txt ("key value" lines): 0 if it isn't there --*/
++static int rpu_setting(const char *name, const char *key, char *out, size_t n) {
++  char dir[512], path[700], line[128], k[32], v[64];
++  int found = 0;
++  FILE *f;
++  rpu_dir(dir, sizeof dir);
++  snprintf(path, sizeof path, "%s/rpu_%s.txt", dir, name);
++  if ((f = fopen(path, "r")) == NULL) return 0;
++  while (!found && fgets(line, sizeof line, f))
++    if (sscanf(line, "%31s %63s", k, v) == 2 && !strcmp(k, key)) { snprintf(out, n, "%s", v); found = 1; }
++  fclose(f);
++  return found;
++}
++static const struct GameDriver *rpu_machine_of(const char *name) {  /* the rom line's game */
++  char rom[64];
++  int i;
++  if (!rpu_setting(name, "rom", rom, sizeof rom)) return NULL;
++  for (i = 0; drivers[i]; i++) if (!strcmp(drivers[i]->name, rom)) return drivers[i];
++  fprintf(stderr, "RPU: %s: no game called %s\n", name, rom);
++  return NULL;
++}
++
++/*-- System 4 and 6 games, any number: the machine's playfield settings, by its rom line --*/
++S6_INPUT_PORTS_START(rpu_s6, 1) S6_INPUT_PORTS_END
++static void init_rpu_s6(void) {
++  const char *name = Machine->gamedrv->name + 4;
++  const struct GameDriver *m = rpu_machine_of(name);
++  m->driver_init();                                             /* its core_gameData */
++  rpu_common_init(name);
++  rpu.noBoard = Machine->gamedrv->drv != construct_rpu_s6S;
++  if (rpu.noBoard) printf("RPU: %s: %s's ROMs aren't in the roms folder: WAV sounds only\n", name, m->name);
++}
++ROM_START(rpu_s6)
++  NORMALREGION(0x10000, REGION_CPU1)
++ROM_END
++CORE_GAMEDEFNV(rpu_s6, "RPU game (System 6)", 2022, "RetroPinUpgrade", rpu_s6N, 0)
++
++/*-- Bally -35 games, any number: the WAV Trigger only, no ROMs. The list below gives each plugin an entry --*/
++/* the 7-digit layout is startreb's, so tables made for the 7-digit conversions work; a 6-digit game leaves digit 1 blank */
++static core_tLCDLayout rpu_dispBy6[] = {
++  {0, 0, 2,6,CORE_SEG7}, {0,14,10,6,CORE_SEG7},
++  {2, 0,18,6,CORE_SEG7}, {2,14,26,6,CORE_SEG7},
++  {4, 2,35,2,CORE_SEG7}, {4, 8,38,2,CORE_SEG7},{0}
++};
++static core_tLCDLayout rpu_dispBy7[] = {
++  {0, 0, 1,7,CORE_SEG7}, {0,16, 9,7,CORE_SEG7},
++  {2, 0,17,7,CORE_SEG7}, {2,16,25,7,CORE_SEG7},
++  {4, 4,35,2,CORE_SEG7}, {4,10,38,2,CORE_SEG7},{0}
++};
++BY35_INPUT_PORTS_START(rpu_by35, 1) BY35_INPUT_PORTS_END
++static core_tGameData rpu_by35GameData = { GEN_BY35, rpu_dispBy6, {FLIP_SW(FLIP_L)} };
++/* the display the table was made for: the digits line, else the game's own */
++static int rpu_table_digits(const char *name) {
++  char v[64];
++  if (rpu_setting(name, "digits", v, sizeof v)) return atoi(v);
++  return rpu.g ? rpu.g->display_digits() : 6;
++}
++static void init_rpu_by35(void) {
++  const char *name = Machine->gamedrv->name + 4;                /* after "rpu_" */
++  rpu_common_init(name);
++  rpu.by35 = 1;
++  rpu_by35GameData.lcdLayout = rpu_table_digits(name) == 7 ? rpu_dispBy7 : rpu_dispBy6;
++  core_gameData = &rpu_by35GameData;
++}
++ROM_START(rpu_by35)
++  NORMALREGION(0x10000, REGION_CPU1)
++ROM_END
++CORE_GAMEDEFNV(rpu_by35, "RPU game (Bally -35)", 2022, "RetroPinUpgrade", rpu_by35, 0)
++
++/*-- the machine's sound board ROMs and none of its CPU ROMs: the RPU game is the CPU --*/
++static const struct RomModule *rpu_sound_roms(const struct GameDriver *m) {
++  const struct RomModule *r = m->rom, *from;
++  struct RomModule *out;
++  size_t n = 1;
++  while (!ROMENTRY_ISEND(r) && !(ROMENTRY_ISREGION(r) && ROMREGION_GETTYPE(r) != REGION_CPU1)) r++;
++  for (from = r; !ROMENTRY_ISEND(r); r++) n++;
++  if ((out = (struct RomModule *)malloc((n + 1) * sizeof *out)) == NULL) return m->rom;
++  out[0] = driver_rpu_s6.rom[0];                                /* its CPU1 region */
++  memcpy(out + 1, from, n * sizeof *out);
++  return out;
++}
++
++/*-- a game for each plugin: added to the end of drivers[], which keeps RPU_SPARE_DRIVERS empty for this --*/
++static void rpu_add_game(const char *file) {                    /* file: rpu_<game>.dylib */
++  static int at = -1, added = 0;
++  const char *dot = strrchr(file, '.');
++  const struct GameDriver *m;
++  struct GameDriver *d;
++  char *name, *longname;
++  size_t n;
++  if (strncmp(file, "rpu_", 4) || !dot || added >= RPU_SPARE_DRIVERS - 1) return;
++  if (at < 0) for (at = 0; drivers[at]; at++);
++  n = dot - file;
++  d = (struct GameDriver *)malloc(sizeof *d);
++  name = (char *)malloc(n + 1);
++  longname = (char *)malloc(n + 8);
++  if (!d || !name || !longname) return;
++  memcpy(name, file, n); name[n] = 0;
++  snprintf(longname, n + 8, "%s (RPU)", name + 4);
++  *d = driver_rpu_by35;
++  d->name = name;
++  d->description = longname;
++  if ((m = rpu_machine_of(name + 4)) != NULL) {
++    if (!strstr(m->source_file, "s4games") && !strstr(m->source_file, "s6games"))
++      fprintf(stderr, "RPU: %s: only System 4 and 6 take a rom line so far\n", name);
++    else {
++      char dir[512], rom[700];
++      struct stat st;
++      *d = driver_rpu_s6;
++      d->name = name;
++      d->description = longname;
++      rpu_dir(dir, sizeof dir);
++      snprintf(rom, sizeof rom, "%s/../roms/%s.zip", dir, m->name);
++      if (stat(rom, &st)) snprintf(rom, sizeof rom, "%s/../roms/%s", dir, m->name);
++      if (!stat(rom, &st)) { d->clone_of = m; d->rom = rpu_sound_roms(m); d->drv = construct_rpu_s6S; }
++    }
++  }
++  drivers[at++] = d;
++  added++;
++}
++#ifdef _WIN32
++static void rpu_find_games(void) {
++  char dir[512], pattern[600];
++  WIN32_FIND_DATAA fd;
++  HANDLE h;
++  rpu_dir(dir, sizeof dir);
++  snprintf(pattern, sizeof pattern, "%s\\rpu_*.dll", dir);
++  if ((h = FindFirstFileA(pattern, &fd)) == INVALID_HANDLE_VALUE) return;
++  do rpu_add_game(fd.cFileName); while (FindNextFileA(h, &fd));
++  FindClose(h);
++}
++#pragma section(".CRT$XCU", read)
++__declspec(allocate(".CRT$XCU")) static void (*rpu_find_games_at_load)(void) = rpu_find_games;
++#else
++#include <dirent.h>
++__attribute__((constructor)) static void rpu_find_games(void) {
++#  ifdef __APPLE__
++  static const char ext[] = ".dylib";
++#  else
++  static const char ext[] = ".so";
++#  endif
++  char dir[512];
++  DIR *d;
++  struct dirent *e;
++  rpu_dir(dir, sizeof dir);
++  if (!(d = opendir(dir))) return;
++  while ((e = readdir(d)) != NULL) {
++    const char *dot = strrchr(e->d_name, '.');
++    if (dot && !strcmp(dot, ext)) rpu_add_game(e->d_name);
++  }
++  closedir(d);
++}
++#endif
+diff --git a/src/wpc/rpu_plugin.h b/src/wpc/rpu_plugin.h
+new file mode 100644
+index 000000000..c8e0c2c3d
+--- /dev/null
++++ b/src/wpc/rpu_plugin.h
+@@ -0,0 +1,54 @@
++/* rpu-pinmame: the interface between PinMAME's RPU driver and an RPU game built as a plugin.
++ *
++ * Copyright (C) 2026 John Turner (wifijt). The game plugin is GPL-3.0, like RPU and rpu-sim; this
++ * header is BSD-3-Clause so PinMAME's driver can include it. The driver loads the plugin at run time
++ * (dlopen / LoadLibrary) and calls rpu_plugin_get().
++ *
++ * Numbers here are the game's own (RPU numbering, from 0). The driver adds PinMAME's offsets.
++ */
++#ifndef RPU_PLUGIN_H
++#define RPU_PLUGIN_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define RPU_PLUGIN_VERSION 1
++
++typedef struct {
++  int version;                                        /* RPU_PLUGIN_VERSION */
++  const char *game;                                   /* e.g. "Scorpion2022" */
++
++  /* Runs the game's setup(). sound_dir: the game's WAV files (NNN_name.wav); eeprom: the saved
++     settings (size bytes), or NULL for a fresh machine. */
++  void (*start)(const char *sound_dir, const uint8_t *eeprom, int size);
++  /* Advances the game by ms milliseconds: one pass of loop() each. */
++  void (*run_ms)(unsigned ms);
++
++  void (*set_switch)(int sw, int closed);
++  int (*lamp)(int n);                                 /* 1 lit (flashing worked out at the current time) */
++  uint32_t (*solenoids)(void);                        /* bit n: coil n is energised now */
++  int (*flippers_enabled)(void);
++  int (*display_digit)(int display, int pos);         /* display 0-3, pos 0 = leftmost: 0-9, or -1 blank */
++  int (*display_digits)(void);                        /* digits per player display */
++  int (*credits)(void);                               /* the credit display, -1 off */
++  int (*ball_in_play)(void);                          /* the ball-in-play / match display, -1 off */
++
++  /* The machine's own sound board: the next command (RPU's sound number), or -1. */
++  int (*sound_command)(void);
++  /* The WAV Trigger: mixes `frames` stereo frames at `rate` into `out` (interleaved L R). */
++  void (*render_audio)(int16_t *out, int frames, int rate);
++
++  /* The game's EEPROM, for the host to save; dirty is set when it changed since the last call. */
++  const uint8_t *(*eeprom)(int *size, int *dirty);
++} rpu_plugin_api;
++
++typedef const rpu_plugin_api *(*rpu_plugin_get_fn)(void);
++const rpu_plugin_api *rpu_plugin_get(void);
++
++#ifdef __cplusplus
++}
++#endif
++#endif

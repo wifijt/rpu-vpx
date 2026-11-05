@@ -1,0 +1,63 @@
+name: vpinmame
+# VPinMAME64.dll for Windows VPX, with the RPU driver: PinMAME at PINMAME_BASE plus pinmame-rpu.patch.
+# The same steps as PinMAME's own vpinmame workflow, x64 only. A v* tag also makes a release.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: VPinMAME64 (RPU)
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v6
+      - name: PinMAME at PINMAME_BASE
+        run: |
+          git clone -q --filter=blob:none --no-checkout https://github.com/vpinball/pinmame.git pinmame
+          git -C pinmame checkout -q "$(cat PINMAME_BASE)"
+          git -C pinmame apply ../pinmame-rpu.patch
+      - uses: ilammy/setup-nasm@v1
+      - name: Build number
+        working-directory: pinmame
+        run: |
+          perl -i -pe"s/unknown/rpu-$(git -C .. rev-parse --short HEAD)/g" src/git_version.h
+      - name: VPMAlias.txt into Alias.cpp
+        working-directory: pinmame
+        run: |
+          output=$(awk -F, '!/^#/ {printf "  { \"%s\", \"%s\" },\n", $1, $2}' release/VPMAlias.txt)
+          sed -i '/\/\*VPMALIAS\*\//r/dev/stdin' src/win32com/Alias.cpp <<< "$output"
+      - name: Build
+        working-directory: pinmame
+        run: |
+          cp cmake/vpinmame/CMakeLists_win-x64.txt CMakeLists.txt
+          cmake -G "Visual Studio 18 2026" -A x64 -B build/vpinmame
+          cmake --build build/vpinmame --config Release
+          cp cmake/instvpm/CMakeLists_win-x64.txt CMakeLists.txt
+          cmake -G "Visual Studio 18 2026" -A x64 -B build/instvpm
+          cmake --build build/instvpm --config Release
+      - name: Package
+        run: |
+          mkdir -p out/rpu
+          cp pinmame/build/vpinmame/Release/VPinMAME64.dll pinmame/build/instvpm/Release/Setup64.exe out/
+          cp pinmame/release/license.txt out/pinmame-license.txt
+          cp README.md out/
+          echo "Put rpu_<game>.dll (and its <game>\ WAV folder) here." > out/rpu/README.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpu-vpinmame64-${{ github.sha }}
+          path: out
+      - name: Release (v* tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          (cd out && 7z a ../rpu-vpinmame64-${{ github.ref_name }}.zip . > /dev/null)
+          gh release create "${{ github.ref_name }}" rpu-vpinmame64-${{ github.ref_name }}.zip --prerelease --title "${{ github.ref_name }}" --notes "VPinMAME64 with the RPU driver."
