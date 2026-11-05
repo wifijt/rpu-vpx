@@ -47,6 +47,19 @@ index 03291b909..6e635e01f 100644
 +#define RPU_SPARE_DRIVERS_LIST RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 \
 +  RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8 RPU_SPARE_DRIVERS_8
  extern const struct GameDriver *test_drivers[];
+diff --git a/src/win32com/Controller.cpp b/src/win32com/Controller.cpp
+index 9302ef4eb..4e9858717 100644
+--- a/src/win32com/Controller.cpp
++++ b/src/win32com/Controller.cpp
+@@ -264,6 +264,8 @@ STDMETHODIMP CController::Run(/*[in]*/ LONG_PTR hParentWnd, /*[in,defaultvalue(1
+ 
+ 	int iCheckVal = IDOK;
+ 
++	// RPU games (src/wpc/rpu.c): the game is a plugin, not ROMs; the machine's sound ROM is optional
++	if (strncmp(drivers[m_nGameNo]->name, "rpu_", 4) != 0)
+ 	m_pGame->ShowInfoDlg(0x8000|CHECKOPTIONS_SHOWRESULTSIFFAIL|((vValue.boolVal==VARIANT_TRUE)?0x0000:CHECKOPTIONS_IGNORESOUNDROMS), (LONG_PTR) m_hParentWnd, &iCheckVal);
+ 	if ( iCheckVal==IDCANCEL ) {
+ 		sprintf(szTemp, "Game ROMs for '%s' (%s) invalid!", m_szROM, drivers[m_nGameNo]->description);
 diff --git a/src/wpc/driver.c b/src/wpc/driver.c
 index 907b58301..f261ac044 100644
 --- a/src/wpc/driver.c
