@@ -62,6 +62,7 @@ jobs:
           cp pinmame/build/vpinmame/Release/VPinMAME64.dll pinmame/build/instvpm/Release/Setup64.exe out/
           cp pinmame/release/license.txt out/pinmame-license.txt
           cp README.md out/
+          cp COPYING LICENSE-BSD out/
           cp tools/add-game.ps1 out/
           printf 'Your game: rpu_<game>.hex (the Arduino IDE: Sketch > Export Compiled Binary) and rpu_<game>.txt\r\n(rom scrpn_l1 or startreb), with its WAVs in <game>\\. rpu_avr.dll runs it. add-game.ps1, beside VPinMAME64.dll, puts them here.\r\n' > out/rpu/README.txt
       - uses: actions/upload-artifact@v7
