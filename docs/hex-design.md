@@ -24,22 +24,24 @@ From RPU.cpp (`RPU_DataWrite` / `RPU_DataRead`):
 | Rev | Machines | Data | Address | R/W | VMA | Clock |
 | --- | --- | --- | --- | --- | --- | --- |
 | 101/102 | Williams System 3–7 | PORTA | PORTF (low), PORTK (high) | PE5 | PG1 | PG2: the Mega makes it on 6802/6808 boards; on 6800 boards it waits on the board's |
-| 4 | Bally -17/-35, Stern | per Rev 4 pin map | | | | the board's φ2 (the Mega waits on it) |
+| 4 | Bally -17/-35, Stern | PORTA | PORTF (low), PORTK (high) | PE5 | PG1 | PG2: the board's φ2 (the Mega waits on it) |
 
-A cycle: with VMA high, the first clock rising edge does the transfer. On a read, the bridge calls PinMAME's read at
-that address and puts the byte on PINA before the sketch samples it. On a write, it passes PORTA to PinMAME's
-write. One transfer per VMA pulse, so a read's side effects (a PIA clearing its IRQ flag) happen once, as on the
-real bus.
+A cycle: every clock rising edge with VMA high does a transfer, on the pins as they are then, as on the real bus
+(RPU's reads and writes hold VMA for two clocks, and its timer interrupt can run its own cycles inside one the main
+code started). On a read, the bridge calls PinMAME's read at that address and puts the byte on PINA before the
+sketch samples it. On a write, it passes PORTA to PinMAME's write.
 
 Where the Mega waits on a clock it doesn't make (6800 boards, Bally), the bridge answers reads of that pin from
-the cycle count instead of toggling it, so it costs nothing per cycle.
+the cycle count (the machine's CPU clock, 500 kHz on the -35) instead of toggling it, so it costs nothing per
+cycle. A rising edge the Mega sees with VMA high is a cycle.
 
 ## Everything else on the Mega
 
 | Mega | In the plugin |
 | --- | --- |
 | Timer 1 (RPU's interrupt) | simavr's own timers: the sketch's ISRs run as on the board |
-| IRQ / zero-cross / switch pins | driven from PinMAME's IRQ lines and the machine's signals |
+| IRQ (pin 2, INT4) | Bally: the PIAs' IRQ line, low while asserted, updated after every bus cycle and each slice |
+| Selector switch (pin 38) | closed: run the RPU game |
 | Serial0 (debug) | the game log |
 | Serial1 (WAV Trigger) | parsed as the WAV Trigger protocol (measured on a real one, see the RPU-SP notes): the WAV channel |
 | Serial2 (PinNode link) | ignored for now; later it could reach a real node |

@@ -43,14 +43,19 @@ static size_t line0Len;
 #define R_PORTG 0x34
 #define R_PORTK 0x108
 
-/*-- Rev 101 / 102 (Williams System 3-7): data PORTA, address PORTF (low) + PORTK (high), R/W PE5 (low = write),
-     VMA PG1, clock PG2. On 6802/6808 boards the Mega makes the clock. Every clock with VMA high is a bus cycle,
-     as on the real bus: RPU_DataRead/Write clock twice, and the timer interrupt can run its own cycle in the
-     middle of one the main code started (VMA already high), so each rising edge transfers on the pins as they
-     are then. --*/
-static void rev102_clock(struct avr_irq_t *irq, uint32_t value, void *param) {
-  (void)irq; (void)param;
-  if (!value || !(avr->data[R_PORTG] & 0x02)) return;
+/*-- Rev 4 (Bally -17/-35, Stern), 101, 102 (Williams System 3-7): data PORTA, address PORTF (low) + PORTK
+     (high), R/W PE5 (low = write), VMA PG1, clock PG2. On 6802/6808 boards the Mega makes the clock; on 6800
+     boards (every Rev 4 machine) it waits on the board's phi2. Every clock with VMA high is a bus cycle, as on
+     the real bus: RPU_DataRead/Write clock twice, and the timer interrupt can run its own cycle in the middle of
+     one the main code started (VMA already high), so each rising edge transfers on the pins as they are then. --*/
+static avr_irq_t *irqPin;                               /* PE4, INT4: the machine's IRQ, low = asserted */
+static int irqLevel = -1;
+static void irq_update(void) {
+  int on = bus->irq ? bus->irq() : 0;
+  if (on != irqLevel) { irqLevel = on; avr_raise_irq(irqPin, !on); }
+}
+
+static void bus_cycle(void) {
   uint16_t a = (uint16_t)(avr->data[R_PORTF] | (avr->data[R_PORTK] << 8));
   if (avr->data[R_PORTE] & 0x20) {
     uint8_t d = bus->read(a);
@@ -62,6 +67,28 @@ static void rev102_clock(struct avr_irq_t *irq, uint32_t value, void *param) {
     bus->write(a, avr->data[R_PORTA]);
     if (busLog > 0 && avr->cycle >= busLogFrom) { busLog--; fprintf(stderr, "RPU bus %8.3f ms W %04X %02X\n", avr->cycle / 16000.0, a, avr->data[R_PORTA]); }
   }
+  irq_update();                                         /* a read clears a PIA's flag, a write can mask it */
+}
+
+/* the Mega makes the clock (6802/6808): its own rising edges */
+static void mega_clock(struct avr_irq_t *irq, uint32_t value, void *param) {
+  (void)irq; (void)param;
+  if (value && (avr->data[R_PORTG] & 0x02)) bus_cycle();
+}
+
+/* the board makes it (6800): PG2 reads as phi2 from the cycle count, and an edge seen with VMA high is a cycle.
+   The Mega polls PG2 every few cycles while it waits, so it sees every edge, as it does on the board. */
+static avr_io_read_t pingRead;
+static void *pingParam;
+static unsigned phiHalf;                                /* Mega cycles per half phi2 */
+static uint8_t phi2_read(struct avr_t *a, avr_io_addr_t addr, void *param) {
+  static int last;
+  uint8_t v = pingRead(a, addr, pingParam);
+  int phi = (int)((a->cycle / phiHalf) & 1);
+  (void)param;
+  if (phi && !last && (a->data[R_PORTG] & 0x02)) bus_cycle();
+  last = phi;
+  return (uint8_t)((v & ~0x04) | (phi ? 0x04 : 0));
 }
 
 /*-- Serial0: the game's debug log, a line at a time --*/
@@ -122,7 +149,8 @@ static int avr_open(const char *hex, const char *eeprom, const char *sounds, int
     busLog = atol(getenv("RPU_BUSLOG"));
     busLogFrom = at ? (avr_cycle_count_t)atol(at + 1) * 16000 : 0;
   }
-  if (rev != 101 && rev != 102) { fprintf(stderr, "RPU: board rev %d isn't emulated yet (101 and 102 are)\n", rev); return -1; }
+  if (rev != 4 && rev != 101 && rev != 102) { fprintf(stderr, "RPU: board rev %d isn't emulated yet (4, 101 and 102 are)\n", rev); return -1; }
+  if (rev == 4 && !b->clock_hz) { fprintf(stderr, "RPU: Rev 4 needs the board's clock (a 6800 machine)\n"); return -1; }
   if (!(code = read_ihex_file(hex, &size, &start))) { fprintf(stderr, "RPU: can't read %s\n", hex); return -1; }
   bus = b;
   avr = avr_make_mcu_by_name("atmega2560");
@@ -134,7 +162,21 @@ static int avr_open(const char *hex, const char *eeprom, const char *sounds, int
   avr->pc = 0;
   snprintf(eePath, sizeof eePath, "%s", eeprom);
   ee_load();
-  avr_irq_register_notify(avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('G'), IOPORT_IRQ_PIN2), rev102_clock, NULL);
+  if (b->clock_hz) {                                    /* PING's read: phi2 on PG2 */
+    avr_io_addr_t io = AVR_DATA_TO_IO(0x32);
+    pingRead = avr->io[io].r.c;
+    pingParam = avr->io[io].r.param;
+    phiHalf = F_MEGA / (2 * b->clock_hz);
+    if (!pingRead || !phiHalf) { fprintf(stderr, "RPU: can't make phi2 at %u Hz\n", b->clock_hz); return -1; }
+    avr->io[io].r.c = phi2_read;
+  } else
+    avr_irq_register_notify(avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('G'), IOPORT_IRQ_PIN2), mega_clock, NULL);
+  /* the board's selector switch (pin 38, PD7) closed: run the RPU game. Games boot the original ROM on it open
+     (RPU_CMD_BOOT_ORIGINAL_IF_NOT_SWITCH_CLOSED), and there's no original ROM here */
+  avr_raise_irq(avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('D'), IOPORT_IRQ_PIN7), 1);
+  irqPin = avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('E'), IOPORT_IRQ_PIN4);
+  irqLevel = -1;
+  irq_update();                                         /* PE4 high: no IRQ yet */
   avr_irq_register_notify(avr_io_getirq(avr, AVR_IOCTL_UART_GETIRQ('0'), UART_IRQ_OUTPUT), uart0_out, NULL);
   quiet_uart('0'); quiet_uart('1'); quiet_uart('2'); quiet_uart('3');
   rx1 = avr_io_getirq(avr, AVR_IOCTL_UART_GETIRQ('1'), UART_IRQ_INPUT);
@@ -148,6 +190,7 @@ static void avr_run_us(unsigned us) {
   avr_cycle_count_t end;
   if (!avr) return;
   end = avr->cycle + (avr_cycle_count_t)us * (F_MEGA / 1000000);
+  irq_update();                                         /* the machine's timers ran since the last slice */
   while (avr->cycle < end) {
     int s = avr_run(avr);
     if (breakPc >= 0 && avr->pc == (avr_flashaddr_t)breakPc) {
@@ -163,6 +206,10 @@ static void avr_run_us(unsigned us) {
       }
     }
     if (s == cpu_Done || s == cpu_Crashed) { fprintf(stderr, "RPU: the Mega stopped (state %d, pc %05X)\n", s, avr->pc); avr = NULL; return; }
+  }
+  if (getenv("RPU_PCLOG")) {                            /* RPU_PCLOG=1: where the Mega is, every 100 ms */
+    static unsigned since;
+    if ((since += us) >= 100000) { since = 0; fprintf(stderr, "RPU pc %8.1f ms: %05X\n", avr->cycle / 16000.0, avr->pc); }
   }
   /* the EEPROM: a cheap check once a second of Mega time */
   if ((eeSaveIn += us) >= 1000000) { eeSaveIn = 0; ee_save(); }

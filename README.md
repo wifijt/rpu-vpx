@@ -12,9 +12,14 @@ Any VPX table made for the machine works.
 | Machine | RPU board rev | `rpu_<game>.txt` | ROMs |
 | --- | --- | --- | --- |
 | Williams System 6 | 101 or 102 | `rom scrpn_l1` (the machine) and `rev 102` (your build's `RPU_OS_HARDWARE_REV`, default 102) | only the sound ROM, optional |
+| Bally -35 | 4 | `rom startrek` (the machine) and `rev 4` (the default) | only the sound board's, optional |
 
-Bally -35 and Williams System 4 come next. This kit has no ROMs and never will: without the machine's sound ROM your
-game still plays, with WAV sounds only. Use your own ROMs.
+`rpu_<game>.txt` names the machine your game runs on: PinMAME's short name for it (`scrpn_l1`, `startrek`), which
+gives your game that machine's playfield, displays and sound board. Williams System 4 comes next. This kit has no ROMs
+and never will: without the machine's sound ROM your game still plays, with WAV sounds only. Use your own ROMs.
+
+The emulated RPU board has its selector switch closed, so a game built with `RPU_CMD_BOOT_ORIGINAL_IF_NOT_SWITCH_CLOSED`
+runs, as it does on the machine with the switch set to RPU.
 
 ## What you need
 
@@ -46,6 +51,7 @@ Numbering: PinMAME counts switches, coils and lamps from 1, RPU from 0, so RPU s
 | `RPU_BUSLOG=n[@ms]` | prints n bus cycles (from ms into the run): every PIA read and write |
 | `RPU_WATCH=0xADDR` | prints each change of one RAM byte, with the program counter (`avr-nm` on your build's `.elf` gives addresses) |
 | `RPU_BREAK=0xADDR` | prints each time the Mega reaches that flash address, with r24 and the caller |
+| `RPU_PCLOG=1` | prints where the Mega is every 100 ms (`avr-addr2line -f -e <sketch>.ino.elf 0xADDR` names it) |
 | `RPU_PLUGIN_DIR` | another `rpu` folder |
 
 ## The compiled plugin

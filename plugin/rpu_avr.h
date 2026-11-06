@@ -14,12 +14,14 @@
 extern "C" {
 #endif
 
-#define RPU_AVR_VERSION 1
+#define RPU_AVR_VERSION 2
 
 /* The machine's bus, as the halted CPU's socket sees it: the driver passes these to PinMAME's memory map. */
 typedef struct {
   uint8_t (*read)(uint16_t address);
   void (*write)(uint16_t address, uint8_t data);
+  int (*irq)(void);                                   /* the CPU's IRQ line, 1 = asserted; NULL: not wired to the Mega */
+  unsigned clock_hz;                                  /* the board's phi2, which the Mega waits on; 0: the Mega makes it */
 } rpu_avr_bus;
 
 typedef struct {

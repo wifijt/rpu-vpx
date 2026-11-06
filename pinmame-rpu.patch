@@ -60,6 +60,41 @@ index 9302ef4eb..4e9858717 100644
  	m_pGame->ShowInfoDlg(0x8000|CHECKOPTIONS_SHOWRESULTSIFFAIL|((vValue.boolVal==VARIANT_TRUE)?0x0000:CHECKOPTIONS_IGNORESOUNDROMS), (LONG_PTR) m_hParentWnd, &iCheckVal);
  	if ( iCheckVal==IDCANCEL ) {
  		sprintf(szTemp, "Game ROMs for '%s' (%s) invalid!", m_szROM, drivers[m_nGameNo]->description);
+diff --git a/src/wpc/by35.c b/src/wpc/by35.c
+index 5a56802d7..f5c6e813e 100644
+--- a/src/wpc/by35.c
++++ b/src/wpc/by35.c
+@@ -496,8 +496,17 @@ static struct pia6821_interface by35_pia[] = {{
+ /* IRQ: A/B              */  piaIrq2,piaIrq3
+ }};
+ 
++void (*by35_rpuHook)(double seconds) = NULL;   /* RPU (rpu.c): an RPU board's Mega runs here, in the 6800's place */
++int by35_irqState(void) { return locals.oldstate; }   /* the PIAs' IRQ line, as the RPU board's Mega sees it */
++
+ static INTERRUPT_GEN(by35_irq) {
+     pia_set_input_ca1(BY35_PIA1, locals.ca11 = !locals.ca11);
++    if (by35_rpuHook) {
++      static double last;
++      double now = timer_get_time();
++      by35_rpuHook(now > last ? now - last : 0.);
++      last = now;
++    }
+ }
+ 
+ static void by35_zeroCross(int data) {
+diff --git a/src/wpc/by35.h b/src/wpc/by35.h
+index 35746bbcd..72639d6dc 100644
+--- a/src/wpc/by35.h
++++ b/src/wpc/by35.h
+@@ -335,6 +335,8 @@
+ #define HNK_ROMEND ROM_END
+ 
+ extern MACHINE_DRIVER_EXTERN(by35);
++extern void (*by35_rpuHook)(double seconds);   /* rpu.c: runs an RPU board's Mega for that long */
++extern int by35_irqState(void);
+ extern MACHINE_DRIVER_EXTERN(by35_32S);
+ extern MACHINE_DRIVER_EXTERN(by35_51S);
+ extern MACHINE_DRIVER_EXTERN(by35_51NS);
 diff --git a/src/wpc/driver.c b/src/wpc/driver.c
 index 907b58301..f261ac044 100644
 --- a/src/wpc/driver.c
@@ -74,10 +109,10 @@ index 907b58301..f261ac044 100644
  const struct GameDriver *test_drivers[] = { 0 };
 diff --git a/src/wpc/rpu.c b/src/wpc/rpu.c
 new file mode 100644
-index 000000000..8ea7bc537
+index 000000000..45efe38d0
 --- /dev/null
 +++ b/src/wpc/rpu.c
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,699 @@
 +// license:BSD-3-Clause
 +/************************************************************************************************
 +  RPU: RetroPinUpgrade games on the machines they were written for.
@@ -426,19 +461,22 @@ index 000000000..8ea7bc537
 +
 +/************************************************************************************************
 +  .hex games: the game's own Arduino .hex runs on an emulated Mega (the rpu_avr plugin, GPL-3.0), which
-+  drives the machine's real bus. The machine is PinMAME's own System 6 emulation with its 6808 halted, as an
-+  RPU board halts it: every PIA, the displays, lamps, coils and the sound board work as they do for the
-+  stock game. rpu_<game>.hex beside rpu_avr; rpu_<game>.txt: rom scrpn_l1, and rev 102 (the board rev the
-+  hex was built for, the default). The Mega's EEPROM is kept in rpu_<game>.eep.
++  drives the machine's real bus. The machine is PinMAME's own emulation of it (System 6, Bally -35) with its
++  CPU halted, as an RPU board halts it: every PIA, the displays, lamps, coils and the sound board work as they
++  do for the stock game. rpu_<game>.hex beside rpu_avr; rpu_<game>.txt: rom scrpn_l1 (or startrek), and rev,
++  the board rev the hex was built for (102 on System 6, 4 on Bally, the defaults). The Mega's EEPROM is kept
++  in rpu_<game>.eep.
 +************************************************************************************************/
 +static const rpu_avr_api *rpu_hex;
++static int rpu_hexBy35;                                         /* Bally -35, not System 6 */
++static int rpu_hexOn;
 +static double rpu_hexOwed;                                      /* Mega time still to run, in microseconds */
 +
 +static uint8_t rpu_hex_read(uint16_t a) { return cpunum_read_byte(0, a); }
 +static void rpu_hex_write(uint16_t a, uint8_t d) { cpunum_write_byte(0, a, d); }
-+static const rpu_avr_bus rpu_hexBus = {rpu_hex_read, rpu_hex_write};
++static rpu_avr_bus rpu_hexBus = {rpu_hex_read, rpu_hex_write, NULL, 0};
 +
-+/* System 6's IRQ timer (about 1 kHz): the Mega's share of time, then the bench check */
++/* the machine's IRQ timer (System 6 about 1 kHz, Bally 634 Hz): the Mega's share of time, then the bench check */
 +static void rpu_hex_tick(double seconds) {
 +  unsigned us;
 +  rpu_hexOwed += seconds * 1e6;
@@ -448,12 +486,13 @@ index 000000000..8ea7bc537
 +  if (getenv("RPU_AUTOTEST")) {
 +    static double t = 0;
 +    int ms = (int)((t += seconds) * 1000), l, lit = 0;
++    int coin = rpu_hexBy35 ? 10 : 4, start = rpu_hexBy35 ? 6 : 3;
 +    static int last = -1;
 +    if (ms / 100 == last) return;
 +    last = ms / 100;
-+    if (ms >= 8000 && ms < 8200) core_setSw(6, 1); else if (ms < 8400) core_setSw(6, 0);
-+    if (ms >= 8400 && ms < 8600) core_setSw(4, 1); else core_setSw(4, 0);
-+    if (ms >= 10000 && ms < 10200) core_setSw(3, 1); else core_setSw(3, 0);
++    if (!rpu_hexBy35) { if (ms >= 8000 && ms < 8200) core_setSw(6, 1); else if (ms < 8400) core_setSw(6, 0); }
++    core_setSw(coin, ms >= 8400 && ms < 8600);
++    core_setSw(start, ms >= 10000 && ms < 10200);
 +    if (ms % 2000 < 100) {
 +      for (l = 0; l < 64; l++) lit += (coreGlobals.lampMatrix[l / 8] >> (l % 8)) & 1;
 +      fprintf(stderr, "RPU autotest %5d ms: lamps lit %d, coils %08x\n", ms, lit, (unsigned)coreGlobals.solenoids);
@@ -490,7 +529,7 @@ index 000000000..8ea7bc537
 +static void rpu_hexwav_update(int param, INT16 **buffer, int length) {
 +  static INT16 mix[2 * 4096];
 +  int i;
-+  if (!rpu_hex || !s6_rpuHook || length > 4096) {
++  if (!rpu_hex || !rpu_hexOn || length > 4096) {
 +    memset(buffer[0], 0, length * sizeof(INT16)); memset(buffer[1], 0, length * sizeof(INT16)); return;
 +  }
 +  rpu_hex->render_audio(mix, length, Machine->sample_rate);
@@ -516,22 +555,37 @@ index 000000000..8ea7bc537
 +  MDRV_SOUND_ADD(CUSTOM, rpu_hexWavInt)
 +MACHINE_DRIVER_END
 +
++/* Bally -35: each sound board's machine, plus the WAV channel */
++#define RPU_BY35HEX(x) MACHINE_DRIVER_START(rpu_hex_##x) MDRV_IMPORT_FROM(x) MDRV_SOUND_ADD(CUSTOM, rpu_hexWavInt) MACHINE_DRIVER_END
++RPU_BY35HEX(by35)       RPU_BY35HEX(by35_32S)   RPU_BY35HEX(by35_51S)   RPU_BY35HEX(by35_51NS)
++RPU_BY35HEX(by35_56S)   RPU_BY35HEX(by35_61S)   RPU_BY35HEX(by35_61S2)  RPU_BY35HEX(by35_45S)
++static const struct { void (*m)(struct InternalMachineDriver *); void (*hex)(struct InternalMachineDriver *); } rpu_by35Machines[] = {
++  {construct_by35, construct_rpu_hex_by35},         {construct_by35_32S, construct_rpu_hex_by35_32S},
++  {construct_by35_51S, construct_rpu_hex_by35_51S}, {construct_by35_51NS, construct_rpu_hex_by35_51NS},
++  {construct_by35_56S, construct_rpu_hex_by35_56S}, {construct_by35_61S, construct_rpu_hex_by35_61S},
++  {construct_by35_61S2, construct_rpu_hex_by35_61S2}, {construct_by35_45S, construct_rpu_hex_by35_45S},
++};
++
++/* a CPU with no ROM, parked in a loop at 0xf000 */
++static void rpu_park(int region) {
++  UINT8 *r = memory_region(region);
++  if (!r || memory_region_length(region) < 0x10000) return;
++  r[0xf000] = 0x20; r[0xf001] = 0xfe;                           /* BRA * */
++  r[0xfff8] = r[0xfffa] = r[0xfffc] = r[0xfffe] = 0xf0;
++  r[0xfff9] = r[0xfffb] = r[0xfffd] = r[0xffff] = 0x00;
++}
++
 +static void init_rpu_hex(void) {
 +  const char *name = Machine->gamedrv->name + 4;                /* after "rpu_" */
 +  const struct GameDriver *m = rpu_machine_of(name);
-+  UINT8 *rom = memory_region(REGION_CPU1);
 +  char dir[512], hex[700], eep[700], sounds[700], v[64];
-+  int rev = rpu_setting(name, "rev", v, sizeof v) ? atoi(v) : 102;
++  int rev, i;
++  rpu_hexBy35 = strstr(m->source_file, "by35games") != NULL;
++  rev = rpu_setting(name, "rev", v, sizeof v) ? atoi(v) : rpu_hexBy35 ? 4 : 102;
 +  m->driver_init();                                             /* the machine's core_gameData */
-+  /* the 6808 is halted, as an RPU board halts it: every vector points at a loop */
-+  rom[0xf000] = 0x20; rom[0xf001] = 0xfe;                       /* BRA * */
-+  rom[0xfff8] = rom[0xfffa] = rom[0xfffc] = rom[0xfffe] = 0xf0;
-+  rom[0xfff9] = rom[0xfffb] = rom[0xfffd] = rom[0xffff] = 0x00;
++  rpu_park(REGION_CPU1);                                        /* halted, as an RPU board halts it */
 +  if (!Machine->gamedrv->clone_of) {                            /* no sound ROM: park the sound CPU too */
-+    UINT8 *snd = memory_region(S67S_MEMREG_SCPU);
-+    snd[0xf000] = 0x20; snd[0xf001] = 0xfe;
-+    snd[0xfff8] = snd[0xfffa] = snd[0xfffc] = snd[0xfffe] = 0xf0;
-+    snd[0xfff9] = snd[0xfffb] = snd[0xfffd] = snd[0xffff] = 0x00;
++    for (i = 1; i < cpu_gettotalcpu(); i++) rpu_park(REGION_CPU1 + i);
 +    fprintf(stderr, "RPU: %s: %s's sound ROM isn't in the roms folder: the sound board is silent\n", name, m->name);
 +  }
 +  rpu_dir(dir, sizeof dir);
@@ -539,8 +593,27 @@ index 000000000..8ea7bc537
 +  snprintf(eep, sizeof eep, "%s/rpu_%s.eep", dir, name);
 +  snprintf(sounds, sizeof sounds, "%s/%s", dir, name);
 +  rpu_hexOwed = 0;
++  rpu_hexOn = 0;
 +  s6_rpuHook = NULL;
-+  if ((rpu_hex = rpu_hex_load()) != NULL && rpu_hex->open(hex, eep, sounds, rev, &rpu_hexBus) == 0) s6_rpuHook = rpu_hex_tick;
++  by35_rpuHook = NULL;
++  rpu_hexBus.irq = rpu_hexBy35 ? by35_irqState : NULL;          /* Bally: the PIAs' IRQ to the Mega's pin 2 */
++  rpu_hexBus.clock_hz = rpu_hexBy35 ? (unsigned)Machine->drv->cpu[0].cpu_clock : 0;
++  if ((rpu_hex = rpu_hex_load()) != NULL && rpu_hex->open(hex, eep, sounds, rev, &rpu_hexBus) == 0) {
++    rpu_hexOn = 1;
++    if (rpu_hexBy35) by35_rpuHook = rpu_hex_tick; else s6_rpuHook = rpu_hex_tick;
++  }
++}
++
++/* no ROM set: the machine's memory regions, empty, so its CPUs and sound board have somewhere to run */
++static const struct RomModule *rpu_empty_regions(const struct GameDriver *m) {
++  const struct RomModule *r;
++  struct RomModule *out;
++  size_t n = 1, k = 0;
++  for (r = m->rom; !ROMENTRY_ISEND(r); r++) if (ROMENTRY_ISREGION(r)) n++;
++  if ((out = (struct RomModule *)malloc(n * sizeof *out)) == NULL) return m->rom;
++  for (r = m->rom; !ROMENTRY_ISEND(r); r++) if (ROMENTRY_ISREGION(r)) out[k++] = *r;
++  out[k] = *r;                                                  /* the end */
++  return out;
 +}
 +
 +/************************************************************************************************
@@ -649,21 +722,30 @@ index 000000000..8ea7bc537
 +  memcpy(name, file, n); name[n] = 0;
 +  snprintf(longname, n + 8, "%s (RPU)", name + 4);
 +  if (isHex) {
-+    if ((m = rpu_machine_of(name + 4)) == NULL || !strstr(m->source_file, "s6games")) {
-+      fprintf(stderr, "RPU: %s.hex needs a rom line naming a System 6 game, so far\n", name);
-+      return;
-+    }
 +    char dir[512], rom[700];
 +    struct stat st;
++    int by35 = 0, haveRoms;
++    void (*drv)(struct InternalMachineDriver *) = construct_rpu_s6hexS;
++    if ((m = rpu_machine_of(name + 4)) != NULL && strstr(m->source_file, "by35games")) {
++      by35 = 1;
++      for (drv = NULL, i = 0; i < (int)(sizeof rpu_by35Machines / sizeof rpu_by35Machines[0]); i++)
++        if (m->drv == rpu_by35Machines[i].m) drv = rpu_by35Machines[i].hex;
++    }
++    if (!m || (!by35 && !strstr(m->source_file, "s6games")) || !drv) {
++      fprintf(stderr, "RPU: %s.hex needs a rom line naming a System 6 or Bally -35 game, so far\n", name);
++      return;
++    }
 +    *d = *m;                                                    /* its input ports and flags */
 +    d->name = name;
 +    d->description = longname;
 +    d->driver_init = init_rpu_hex;
++    d->drv = drv;
 +    rpu_dir(dir, sizeof dir);
 +    snprintf(rom, sizeof rom, "%s/../roms/%s.zip", dir, m->name);
 +    if (stat(rom, &st)) snprintf(rom, sizeof rom, "%s/../roms/%s", dir, m->name);
-+    if (!stat(rom, &st)) { d->clone_of = m; d->rom = rpu_sound_roms(m); d->drv = construct_rpu_s6hexS; }
-+    else { d->clone_of = NULL; d->rom = rom_rpu_s6hexN; d->drv = construct_rpu_s6hexS; }
++    haveRoms = !stat(rom, &st);
++    d->clone_of = haveRoms ? m : NULL;
++    d->rom = haveRoms ? rpu_sound_roms(m) : by35 ? rpu_empty_regions(m) : rom_rpu_s6hexN;
 +    drivers[at++] = d;
 +    added++;
 +    return;
@@ -732,10 +814,10 @@ index 000000000..8ea7bc537
 +#endif
 diff --git a/src/wpc/rpu_avr.h b/src/wpc/rpu_avr.h
 new file mode 100644
-index 000000000..7eaf30f92
+index 000000000..2fa969d4a
 --- /dev/null
 +++ b/src/wpc/rpu_avr.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,45 @@
 +/* rpu-vpx: the interface between PinMAME's RPU driver and rpu_avr, the plugin that runs an RPU
 + * game's own .hex on an emulated ATmega2560 and the RPU board's bus.
 + *
@@ -752,12 +834,14 @@ index 000000000..7eaf30f92
 +extern "C" {
 +#endif
 +
-+#define RPU_AVR_VERSION 1
++#define RPU_AVR_VERSION 2
 +
 +/* The machine's bus, as the halted CPU's socket sees it: the driver passes these to PinMAME's memory map. */
 +typedef struct {
 +  uint8_t (*read)(uint16_t address);
 +  void (*write)(uint16_t address, uint8_t data);
++  int (*irq)(void);                                   /* the CPU's IRQ line, 1 = asserted; NULL: not wired to the Mega */
++  unsigned clock_hz;                                  /* the board's phi2, which the Mega waits on; 0: the Mega makes it */
 +} rpu_avr_bus;
 +
 +typedef struct {
