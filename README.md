@@ -41,9 +41,10 @@ After you change your game, export again and run step 7 without `-Table`. Your g
 
 There's no ready-made Mac download yet: you build it from this repo.
 
-1. Install [VPX Standalone](https://github.com/vpinball/vpinball/releases) in `~/Applications`.
+1. Install [VPX Standalone](https://github.com/vpinball/vpinball/releases) in `/Applications` or `~/Applications`.
 2. `tools/install-vpx-macos.sh <PINMAME_SHA>` builds the RPU PinMAME and puts it into VPX. `<PINMAME_SHA>` is the
-   PinMAME commit your VPX release was built with (`PINMAME_BASE` here is VPX 10.8.1's).
+   PinMAME commit your VPX release was built with (`PINMAME_BASE` here is VPX 10.8.1's). If VPX is somewhere else,
+   give the app after the SHA: `tools/install-vpx-macos.sh <PINMAME_SHA> /path/to/VPinballX_BGFX.app`.
 3. Clone [simavr](https://github.com/buserror/simavr) beside this repo and check out the commit in
    `avr/SIMAVR_BASE`, then `avr/build.sh` builds `rpu_avr.dylib`.
    Copy it to `~/.pinmame/rpu/`.
