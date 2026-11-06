@@ -53,14 +53,23 @@ static float db(int g) {
   return powf(10.f, g / 20.f);
 }
 
-/*-- the folder: NNN_anything.wav is track NNN --*/
+/*-- the folder: NNN_anything.wav is track NNN. Two files with one number: the first by name, on every system --*/
 static void wt_add(const char *name) {
   int n = atoi(name);
   size_t l = strlen(name);
+  char *p;
   if (n < 1 || n > MAX_TRACK || l < 5 || (strcmp(name + l - 4, ".wav") && strcmp(name + l - 4, ".WAV"))) return;
-  if (name[0] < '0' || name[0] > '9' || paths[n]) return;
-  paths[n] = (char *)malloc(strlen(dir) + l + 2);
-  if (paths[n]) sprintf(paths[n], "%s/%s", dir, name);
+  if (name[0] < '0' || name[0] > '9') return;
+  if (paths[n]) {
+    const char *had = paths[n] + strlen(dir) + 1;
+    int first = strcmp(name, had) < 0;
+    fprintf(stderr, "RPU: WAV Trigger: track %d has two files, %s and %s: playing %s\n", n, had, name, first ? name : had);
+    if (!first) return;
+    free(paths[n]);
+    paths[n] = NULL;
+  }
+  if ((p = (char *)malloc(strlen(dir) + l + 2)) != NULL) sprintf(p, "%s/%s", dir, name);
+  paths[n] = p;
 }
 static void wt_scan(void) {
 #ifdef _WIN32
