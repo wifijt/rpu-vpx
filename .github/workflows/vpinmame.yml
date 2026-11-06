@@ -1,6 +1,7 @@
 name: vpinmame
 # VPinMAME64.dll for Windows VPX, with the RPU driver: PinMAME at PINMAME_BASE plus pinmame-rpu.patch.
-# The same steps as PinMAME's own vpinmame workflow, x64 only. A v* tag also makes a release.
+# The same steps as PinMAME's own vpinmame workflow, x64 only. Also rpu_avr.dll, the plugin that runs an RPU
+# game's own .hex (simavr at avr/SIMAVR_BASE, MinGW). A v* tag also makes a release.
 on:
   push:
   pull_request:
@@ -43,13 +44,25 @@ jobs:
           cp cmake/instvpm/CMakeLists_win-x64.txt CMakeLists.txt
           cmake -G "Visual Studio 18 2026" -A x64 -B build/instvpm
           cmake --build build/instvpm --config Release
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc git
+      - name: rpu_avr.dll
+        shell: msys2 {0}
+        run: |
+          git clone -q https://github.com/buserror/simavr.git ../simavr
+          git -C ../simavr checkout -q "$(cat avr/SIMAVR_BASE)"
+          CC=gcc avr/build.sh ../simavr
+          objdump -p avr/rpu_avr.dll | grep -E "DLL Name|rpu_avr_get"
       - name: Package
         run: |
           mkdir -p out/rpu
+          cp avr/rpu_avr.dll out/rpu/
           cp pinmame/build/vpinmame/Release/VPinMAME64.dll pinmame/build/instvpm/Release/Setup64.exe out/
           cp pinmame/release/license.txt out/pinmame-license.txt
           cp README.md out/
-          echo "Put rpu_<game>.dll (and its <game>\ WAV folder) here." > out/rpu/README.txt
+          printf 'Your game: rpu_<game>.hex (the Arduino IDE: Sketch > Export Compiled Binary) and rpu_<game>.txt\r\n(rom scrpn_l1), with its WAVs in <game>\\. rpu_avr.dll runs it.\r\n' > out/rpu/README.txt
       - uses: actions/upload-artifact@v7
         with:
           name: rpu-vpinmame64-${{ github.sha }}

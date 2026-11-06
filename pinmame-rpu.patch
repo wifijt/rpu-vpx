@@ -74,10 +74,10 @@ index 907b58301..f261ac044 100644
  const struct GameDriver *test_drivers[] = { 0 };
 diff --git a/src/wpc/rpu.c b/src/wpc/rpu.c
 new file mode 100644
-index 000000000..db9cf25c4
+index 000000000..0687f31dc
 --- /dev/null
 +++ b/src/wpc/rpu.c
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,616 @@
 +// license:BSD-3-Clause
 +/************************************************************************************************
 +  RPU: RetroPinUpgrade games on the machines they were written for.
@@ -112,6 +112,7 @@ index 000000000..db9cf25c4
 +#include "s6.h"
 +#include "by35.h"
 +#include "rpu_plugin.h"
++#include "rpu_avr.h"
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
@@ -424,6 +425,89 @@ index 000000000..db9cf25c4
 +MACHINE_DRIVER_END
 +
 +/************************************************************************************************
++  .hex games: the game's own Arduino .hex runs on an emulated Mega (the rpu_avr plugin, GPL-3.0), which
++  drives the machine's real bus. The machine is PinMAME's own System 6 emulation with its 6808 halted, as an
++  RPU board halts it: every PIA, the displays, lamps, coils and the sound board work as they do for the
++  stock game. rpu_<game>.hex beside rpu_avr; rpu_<game>.txt: rom scrpn_l1, and rev 102 (the board rev the
++  hex was built for, the default). The Mega's EEPROM is kept in rpu_<game>.eep.
++************************************************************************************************/
++static const rpu_avr_api *rpu_hex;
++static double rpu_hexOwed;                                      /* Mega time still to run, in microseconds */
++
++static uint8_t rpu_hex_read(uint16_t a) { return cpunum_read_byte(0, a); }
++static void rpu_hex_write(uint16_t a, uint8_t d) { cpunum_write_byte(0, a, d); }
++static const rpu_avr_bus rpu_hexBus = {rpu_hex_read, rpu_hex_write};
++
++/* System 6's IRQ timer (about 1 kHz): the Mega's share of time, then the bench check */
++static void rpu_hex_tick(double seconds) {
++  unsigned us;
++  rpu_hexOwed += seconds * 1e6;
++  us = (unsigned)rpu_hexOwed;
++  rpu_hexOwed -= us;
++  rpu_hex->run_us(us);
++  if (getenv("RPU_AUTOTEST")) {
++    static double t = 0;
++    int ms = (int)((t += seconds) * 1000), l, lit = 0;
++    static int last = -1;
++    if (ms / 100 == last) return;
++    last = ms / 100;
++    if (ms >= 8000 && ms < 8200) core_setSw(6, 1); else if (ms < 8400) core_setSw(6, 0);
++    if (ms >= 8400 && ms < 8600) core_setSw(4, 1); else core_setSw(4, 0);
++    if (ms >= 10000 && ms < 10200) core_setSw(3, 1); else core_setSw(3, 0);
++    if (ms % 2000 < 100) {
++      for (l = 0; l < 64; l++) lit += (coreGlobals.lampMatrix[l / 8] >> (l % 8)) & 1;
++      fprintf(stderr, "RPU autotest %5d ms: lamps lit %d, coils %08x\n", ms, lit, (unsigned)coreGlobals.solenoids);
++    }
++  }
++}
++
++static const rpu_avr_api *rpu_hex_load(void) {
++  char dir[512], path[700];
++  rpu_dir(dir, sizeof dir);
++#ifdef _WIN32
++  snprintf(path, sizeof path, "%s\\rpu_avr.dll", dir);
++  HMODULE h = LoadLibraryA(path);
++  rpu_avr_get_fn get = h ? (rpu_avr_get_fn)GetProcAddress(h, "rpu_avr_get") : NULL;
++#else
++#  ifdef __APPLE__
++  snprintf(path, sizeof path, "%s/rpu_avr.dylib", dir);
++#  else
++  snprintf(path, sizeof path, "%s/rpu_avr.so", dir);
++#  endif
++  void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++  rpu_avr_get_fn get = h ? (rpu_avr_get_fn)dlsym(h, "rpu_avr_get") : NULL;
++#endif
++  const rpu_avr_api *a = get ? get() : NULL;
++  if (!a) { fprintf(stderr, "RPU: can't load %s\n", path); return NULL; }
++  if (a->version != RPU_AVR_VERSION) { fprintf(stderr, "RPU: %s is version %d, not %d\n", path, a->version, RPU_AVR_VERSION); return NULL; }
++  return a;
++}
++
++static int rpu_setting(const char *name, const char *key, char *out, size_t n);
++static const struct GameDriver *rpu_machine_of(const char *name);
++
++static void init_rpu_hex(void) {
++  const char *name = Machine->gamedrv->name + 4;                /* after "rpu_" */
++  const struct GameDriver *m = rpu_machine_of(name);
++  UINT8 *rom = memory_region(REGION_CPU1);
++  char dir[512], hex[700], eep[700], sounds[700], v[64];
++  int rev = rpu_setting(name, "rev", v, sizeof v) ? atoi(v) : 102;
++  m->driver_init();                                             /* the machine's core_gameData */
++  /* the 6808 is halted, as an RPU board halts it: every vector points at a loop */
++  rom[0xf000] = 0x20; rom[0xf001] = 0xfe;                       /* BRA * */
++  rom[0xfff8] = rom[0xfffa] = rom[0xfffc] = rom[0xfffe] = 0xf0;
++  rom[0xfff9] = rom[0xfffb] = rom[0xfffd] = rom[0xffff] = 0x00;
++  rpu_dir(dir, sizeof dir);
++  snprintf(hex, sizeof hex, "%s/rpu_%s.hex", dir, name);
++  snprintf(eep, sizeof eep, "%s/rpu_%s.eep", dir, name);
++  snprintf(sounds, sizeof sounds, "%s/%s", dir, name);
++  rpu_hexOwed = 0;
++  s6_rpuHook = NULL;
++  if ((rpu_hex = rpu_hex_load()) != NULL && rpu_hex->open(hex, eep, sounds, rev, &rpu_hexBus) == 0) s6_rpuHook = rpu_hex_tick;
++  if (Machine->gamedrv->drv == construct_s6) fprintf(stderr, "RPU: %s: %s's sound ROM isn't in the roms folder: no sound board\n", name, m->name);
++}
++
++/************************************************************************************************
 +  Games
 +************************************************************************************************/
 +/*-- a setting from rpu_<game>.txt ("key value" lines): 0 if it isn't there --*/
@@ -516,15 +600,38 @@ index 000000000..db9cf25c4
 +  struct GameDriver *d;
 +  char *name, *longname;
 +  size_t n;
++  int i, isHex = dot && !strcmp(dot, ".hex");
 +  if (strncmp(file, "rpu_", 4) || !dot || added >= RPU_SPARE_DRIVERS - 1) return;
++  if (!strncmp(file, "rpu_avr.", 8)) return;                    /* the .hex plugin itself */
 +  if (at < 0) for (at = 0; drivers[at]; at++);
 +  n = dot - file;
++  for (i = 0; i < at; i++) if (strlen(drivers[i]->name) == n && !strncmp(drivers[i]->name, file, n)) return;   /* .hex and a plugin: the first found */
 +  d = (struct GameDriver *)malloc(sizeof *d);
 +  name = (char *)malloc(n + 1);
 +  longname = (char *)malloc(n + 8);
 +  if (!d || !name || !longname) return;
 +  memcpy(name, file, n); name[n] = 0;
 +  snprintf(longname, n + 8, "%s (RPU)", name + 4);
++  if (isHex) {
++    if ((m = rpu_machine_of(name + 4)) == NULL || !strstr(m->source_file, "s6games")) {
++      fprintf(stderr, "RPU: %s.hex needs a rom line naming a System 6 game, so far\n", name);
++      return;
++    }
++    char dir[512], rom[700];
++    struct stat st;
++    *d = *m;                                                    /* its input ports and flags */
++    d->name = name;
++    d->description = longname;
++    d->driver_init = init_rpu_hex;
++    rpu_dir(dir, sizeof dir);
++    snprintf(rom, sizeof rom, "%s/../roms/%s.zip", dir, m->name);
++    if (stat(rom, &st)) snprintf(rom, sizeof rom, "%s/../roms/%s", dir, m->name);
++    if (!stat(rom, &st)) { d->clone_of = m; d->rom = rpu_sound_roms(m); d->drv = construct_s6S; }
++    else { d->clone_of = NULL; d->rom = driver_rpu_s6.rom; d->drv = construct_s6; }
++    drivers[at++] = d;
++    added++;
++    return;
++  }
 +  *d = driver_rpu_by35;
 +  d->name = name;
 +  d->description = longname;
@@ -552,6 +659,11 @@ index 000000000..db9cf25c4
 +  WIN32_FIND_DATAA fd;
 +  HANDLE h;
 +  rpu_dir(dir, sizeof dir);
++  snprintf(pattern, sizeof pattern, "%s\\rpu_*.hex", dir);
++  if ((h = FindFirstFileA(pattern, &fd)) != INVALID_HANDLE_VALUE) {
++    do rpu_add_game(fd.cFileName); while (FindNextFileA(h, &fd));
++    FindClose(h);
++  }
 +  snprintf(pattern, sizeof pattern, "%s\\rpu_*.dll", dir);
 +  if ((h = FindFirstFileA(pattern, &fd)) == INVALID_HANDLE_VALUE) return;
 +  do rpu_add_game(fd.cFileName); while (FindNextFileA(h, &fd));
@@ -570,14 +682,66 @@ index 000000000..db9cf25c4
 +  char dir[512];
 +  DIR *d;
 +  struct dirent *e;
++  int pass;
 +  rpu_dir(dir, sizeof dir);
-+  if (!(d = opendir(dir))) return;
-+  while ((e = readdir(d)) != NULL) {
-+    const char *dot = strrchr(e->d_name, '.');
-+    if (dot && !strcmp(dot, ext)) rpu_add_game(e->d_name);
++  for (pass = 0; pass < 2; pass++) {                            /* .hex games first, then plugins */
++    if (!(d = opendir(dir))) return;
++    while ((e = readdir(d)) != NULL) {
++      const char *dot = strrchr(e->d_name, '.');
++      if (dot && !strcmp(dot, pass ? ext : ".hex")) rpu_add_game(e->d_name);
++    }
++    closedir(d);
 +  }
-+  closedir(d);
 +}
++#endif
+diff --git a/src/wpc/rpu_avr.h b/src/wpc/rpu_avr.h
+new file mode 100644
+index 000000000..7eaf30f92
+--- /dev/null
++++ b/src/wpc/rpu_avr.h
+@@ -0,0 +1,43 @@
++/* rpu-vpx: the interface between PinMAME's RPU driver and rpu_avr, the plugin that runs an RPU
++ * game's own .hex on an emulated ATmega2560 and the RPU board's bus.
++ *
++ * Copyright (C) 2026 John Turner (wifijt). The plugin is GPL-3.0 (it contains simavr); this header is
++ * BSD-3-Clause so PinMAME's driver can include it. The driver loads rpu_avr at run time and calls
++ * rpu_avr_get().
++ */
++#ifndef RPU_AVR_H
++#define RPU_AVR_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define RPU_AVR_VERSION 1
++
++/* The machine's bus, as the halted CPU's socket sees it: the driver passes these to PinMAME's memory map. */
++typedef struct {
++  uint8_t (*read)(uint16_t address);
++  void (*write)(uint16_t address, uint8_t data);
++} rpu_avr_bus;
++
++typedef struct {
++  int version;                                        /* RPU_AVR_VERSION */
++  /* Loads the game. hex: the Arduino IDE's .hex; eeprom: the file that keeps the Mega's EEPROM (made if
++     missing); sounds: the game's WAV folder (NNN_name.wav); rev: RPU_OS_HARDWARE_REV the hex was built
++     for. 0 on success. */
++  int (*open)(const char *hex, const char *eeprom, const char *sounds, int rev, const rpu_avr_bus *bus);
++  void (*run_us)(unsigned us);                        /* advances the Mega by us microseconds */
++  /* The WAV Trigger on Serial1: mixes `frames` stereo frames at `rate` into `out` (interleaved L R). */
++  void (*render_audio)(int16_t *out, int frames, int rate);
++  void (*close)(void);                                /* saves the EEPROM */
++} rpu_avr_api;
++
++typedef const rpu_avr_api *(*rpu_avr_get_fn)(void);
++const rpu_avr_api *rpu_avr_get(void);
++
++#ifdef __cplusplus
++}
++#endif
 +#endif
 diff --git a/src/wpc/rpu_plugin.h b/src/wpc/rpu_plugin.h
 new file mode 100644
@@ -639,3 +803,29 @@ index 000000000..c8e0c2c3d
 +}
 +#endif
 +#endif
+diff --git a/src/wpc/s6.c b/src/wpc/s6.c
+index e700159ce..bf8f407fc 100644
+--- a/src/wpc/s6.c
++++ b/src/wpc/s6.c
+@@ -110,7 +110,9 @@ static void s6_piaIrq(int state) {
+   s6_irqline(s6locals.piaIrq = state);
+ }
+ 
++void (*s6_rpuHook)(double seconds) = NULL;   /* RPU (rpu.c): an RPU board's Mega runs here, in the 6808's place */
+ static INTERRUPT_GEN(s6_irq) {
++  if (s6_rpuHook) s6_rpuHook(1. / S6_IRQFREQ);
+   s6_irqline(1);
+ #if defined(LISY_SUPPORT)
+  static int count = 0;
+diff --git a/src/wpc/s6.h b/src/wpc/s6.h
+index 63b73fa67..60060e647 100644
+--- a/src/wpc/s6.h
++++ b/src/wpc/s6.h
+@@ -138,6 +138,7 @@
+ 
+ extern MACHINE_DRIVER_EXTERN(s6);
+ extern MACHINE_DRIVER_EXTERN(s6S);
++extern void (*s6_rpuHook)(double seconds);   /* rpu.c: runs an RPU board's Mega for that long */
+ #define s6_mS6      s6
+ #define s6_mS6S     s6S
+ /* standard 6 digit display layout */

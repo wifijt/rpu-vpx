@@ -6,4 +6,3 @@ out/
 *.dll
 *.so
 avr/spike
-avr/avrinc/

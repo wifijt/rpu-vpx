@@ -50,6 +50,9 @@ static void show(const char *what) {
   cr[0] = digit(disp[4][0]); cr[1] = digit(disp[4][1]); cr[2] = 0;     // layout entry 4: segments 14-15
   bl[0] = digit(disp[5][0]); bl[1] = digit(disp[5][1]); bl[2] = 0;     // entry 5: segments 6-7
   printf("%-8s P1 [%s] P2 [%s]  credits [%s] ball [%s]  audio peak %d\n", what, p1, p2, cr, bl, peak);
+  if (getenv("PMTEST_ALLDISP")) {                               // every layout entry, raw digits
+    for (int e = 0; e < 6; e++) { printf("    entry %d [", e); for (int i = 0; i < 8; i++) putchar(digit(disp[e][i])); printf("]\n"); }
+  }
   peak = 0;
 }
 static void wait(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
@@ -83,6 +86,7 @@ int main(int argc, char **argv) {
   PinmameSetSwitch(9, 1); PinmameSetSwitch(10, 1);       // two balls in the trough (RPU's SW_BALL_1/2 + 1)
   wait(500);
   press(4); wait(1500); show("coin");                       // coin chute 1 (RPU SW_COIN_1 + 1)
+  for (int c = getenv("PMTEST_COINS") ? atoi(getenv("PMTEST_COINS")) : 0; c > 0; c--) { press(4); wait(1500); show("coin+"); }
   press(3); wait(2500);                                     // credit / Start (RPU SW_CREDIT_RESET + 1)
   PinmameSetSwitch(10, 0);                                  // the ball served: its trough switch opens, as the table's would
   wait(1500); show("start");
