@@ -13,5 +13,5 @@ case "$(uname -s)" in
   *) OUT=rpu_avr.so; FLAGS="-shared -fPIC" ;;
 esac
 ${CC:-cc} -O2 -w -fvisibility=hidden -include unistd.h -I. -I"$S/sim" -I"$S/cores" $FLAGS -o $OUT \
-  rpu_avr.c stubs.c $SRCS "$S/cores/sim_mega2560.c"
+  rpu_avr.c wavtrigger.c stubs.c $SRCS "$S/cores/sim_mega2560.c"
 echo "built avr/$OUT"

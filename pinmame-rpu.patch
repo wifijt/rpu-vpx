@@ -74,10 +74,10 @@ index 907b58301..f261ac044 100644
  const struct GameDriver *test_drivers[] = { 0 };
 diff --git a/src/wpc/rpu.c b/src/wpc/rpu.c
 new file mode 100644
-index 000000000..0687f31dc
+index 000000000..8ea7bc537
 --- /dev/null
 +++ b/src/wpc/rpu.c
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,652 @@
 +// license:BSD-3-Clause
 +/************************************************************************************************
 +  RPU: RetroPinUpgrade games on the machines they were written for.
@@ -486,6 +486,36 @@ index 000000000..0687f31dc
 +static int rpu_setting(const char *name, const char *key, char *out, size_t n);
 +static const struct GameDriver *rpu_machine_of(const char *name);
 +
++/* the WAV Trigger on the Mega's Serial1, a channel of its own beside the machine's sound board */
++static void rpu_hexwav_update(int param, INT16 **buffer, int length) {
++  static INT16 mix[2 * 4096];
++  int i;
++  if (!rpu_hex || !s6_rpuHook || length > 4096) {
++    memset(buffer[0], 0, length * sizeof(INT16)); memset(buffer[1], 0, length * sizeof(INT16)); return;
++  }
++  rpu_hex->render_audio(mix, length, Machine->sample_rate);
++  for (i = 0; i < length; i++) { buffer[0][i] = mix[2 * i]; buffer[1][i] = mix[2 * i + 1]; }
++}
++static int rpu_hexwav_start(const struct MachineSound *msound) {
++  static const char *names[2] = {"RPU WAV L", "RPU WAV R"};
++  static const int levels[2] = {MIXER(60, MIXER_PAN_LEFT), MIXER(60, MIXER_PAN_RIGHT)};
++  stream_init_multi(2, names, levels, Machine->sample_rate, 0, rpu_hexwav_update);
++  return 0;
++}
++static void rpu_hexwav_stop(void) {}
++static struct CustomSound_interface rpu_hexWavInt = {rpu_hexwav_start, rpu_hexwav_stop};
++
++/* System 6 as it is, sound board included, plus the WAV channel. Without the sound ROM the sound CPU gets an
++   empty ROM region and is parked like the main one (System 6 always starts its sound board). */
++ROM_START(rpu_s6hexN)
++  NORMALREGION(0x10000, REGION_CPU1)
++  SOUNDREGION(0x10000, S67S_MEMREG_SCPU)
++ROM_END
++MACHINE_DRIVER_START(rpu_s6hexS)
++  MDRV_IMPORT_FROM(s6S)
++  MDRV_SOUND_ADD(CUSTOM, rpu_hexWavInt)
++MACHINE_DRIVER_END
++
 +static void init_rpu_hex(void) {
 +  const char *name = Machine->gamedrv->name + 4;                /* after "rpu_" */
 +  const struct GameDriver *m = rpu_machine_of(name);
@@ -497,6 +527,13 @@ index 000000000..0687f31dc
 +  rom[0xf000] = 0x20; rom[0xf001] = 0xfe;                       /* BRA * */
 +  rom[0xfff8] = rom[0xfffa] = rom[0xfffc] = rom[0xfffe] = 0xf0;
 +  rom[0xfff9] = rom[0xfffb] = rom[0xfffd] = rom[0xffff] = 0x00;
++  if (!Machine->gamedrv->clone_of) {                            /* no sound ROM: park the sound CPU too */
++    UINT8 *snd = memory_region(S67S_MEMREG_SCPU);
++    snd[0xf000] = 0x20; snd[0xf001] = 0xfe;
++    snd[0xfff8] = snd[0xfffa] = snd[0xfffc] = snd[0xfffe] = 0xf0;
++    snd[0xfff9] = snd[0xfffb] = snd[0xfffd] = snd[0xffff] = 0x00;
++    fprintf(stderr, "RPU: %s: %s's sound ROM isn't in the roms folder: the sound board is silent\n", name, m->name);
++  }
 +  rpu_dir(dir, sizeof dir);
 +  snprintf(hex, sizeof hex, "%s/rpu_%s.hex", dir, name);
 +  snprintf(eep, sizeof eep, "%s/rpu_%s.eep", dir, name);
@@ -504,7 +541,6 @@ index 000000000..0687f31dc
 +  rpu_hexOwed = 0;
 +  s6_rpuHook = NULL;
 +  if ((rpu_hex = rpu_hex_load()) != NULL && rpu_hex->open(hex, eep, sounds, rev, &rpu_hexBus) == 0) s6_rpuHook = rpu_hex_tick;
-+  if (Machine->gamedrv->drv == construct_s6) fprintf(stderr, "RPU: %s: %s's sound ROM isn't in the roms folder: no sound board\n", name, m->name);
 +}
 +
 +/************************************************************************************************
@@ -626,8 +662,8 @@ index 000000000..0687f31dc
 +    rpu_dir(dir, sizeof dir);
 +    snprintf(rom, sizeof rom, "%s/../roms/%s.zip", dir, m->name);
 +    if (stat(rom, &st)) snprintf(rom, sizeof rom, "%s/../roms/%s", dir, m->name);
-+    if (!stat(rom, &st)) { d->clone_of = m; d->rom = rpu_sound_roms(m); d->drv = construct_s6S; }
-+    else { d->clone_of = NULL; d->rom = driver_rpu_s6.rom; d->drv = construct_s6; }
++    if (!stat(rom, &st)) { d->clone_of = m; d->rom = rpu_sound_roms(m); d->drv = construct_rpu_s6hexS; }
++    else { d->clone_of = NULL; d->rom = rom_rpu_s6hexN; d->drv = construct_rpu_s6hexS; }
 +    drivers[at++] = d;
 +    added++;
 +    return;

@@ -13,6 +13,7 @@
 #include "avr_uart.h"
 #include "avr_eeprom.h"
 #include "../plugin/rpu_avr.h"
+#include "wavtrigger.h"
 
 #ifdef _WIN32
 #define RPU_AVR_EXPORT __declspec(dllexport)
@@ -74,6 +75,14 @@ static void uart0_out(struct avr_irq_t *irq, uint32_t value, void *param) {
   } else if (c != '\r') line0[line0Len++] = c;
 }
 
+/*-- Serial1: the WAV Trigger. The game's bytes go to it; its replies come back on the Mega's RX1 --*/
+static avr_irq_t *rx1;
+static void uart1_out(struct avr_irq_t *irq, uint32_t value, void *param) {
+  (void)irq; (void)param;
+  wt_rx((uint8_t)value);
+}
+static void uart1_reply(uint8_t b) { avr_raise_irq(rx1, b); }
+
 /*-- the EEPROM: kept in a file beside the hex, written a second after the game last changed it --*/
 static void ee_load(void) {
   FILE *f = fopen(eePath, "rb");
@@ -105,7 +114,6 @@ static void quiet_uart(char n) {
 static int avr_open(const char *hex, const char *eeprom, const char *sounds, int rev, const rpu_avr_bus *b) {
   uint32_t size = 0, start = 0;
   uint8_t *code;
-  (void)sounds;
   logOn = getenv("RPU_PLUGIN_LOG") != NULL;
   if (getenv("RPU_BREAK")) breakPc = strtol(getenv("RPU_BREAK"), NULL, 0);
   if (getenv("RPU_WATCH")) watchAddr = (int)strtol(getenv("RPU_WATCH"), NULL, 0) & 0xffff;
@@ -129,6 +137,9 @@ static int avr_open(const char *hex, const char *eeprom, const char *sounds, int
   avr_irq_register_notify(avr_io_getirq(avr, AVR_IOCTL_IOPORT_GETIRQ('G'), IOPORT_IRQ_PIN2), rev102_clock, NULL);
   avr_irq_register_notify(avr_io_getirq(avr, AVR_IOCTL_UART_GETIRQ('0'), UART_IRQ_OUTPUT), uart0_out, NULL);
   quiet_uart('0'); quiet_uart('1'); quiet_uart('2'); quiet_uart('3');
+  rx1 = avr_io_getirq(avr, AVR_IOCTL_UART_GETIRQ('1'), UART_IRQ_INPUT);
+  avr_irq_register_notify(avr_io_getirq(avr, AVR_IOCTL_UART_GETIRQ('1'), UART_IRQ_OUTPUT), uart1_out, NULL);
+  wt_init(sounds, uart1_reply);
   fprintf(stderr, "RPU: %s: %u bytes, board rev %d\n", hex, size, rev);
   return 0;
 }
@@ -158,8 +169,7 @@ static void avr_run_us(unsigned us) {
 }
 
 static void avr_render(int16_t *out, int frames, int rate) {
-  (void)rate;
-  memset(out, 0, (size_t)frames * 2 * sizeof *out);             /* the WAV Trigger: next step */
+  wt_render(out, frames, rate);
 }
 
 static void avr_close(void) {
