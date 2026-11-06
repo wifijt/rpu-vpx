@@ -5,3 +5,5 @@ out/
 *.dylib
 *.dll
 *.so
+avr/spike
+avr/avrinc/
