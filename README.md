@@ -31,6 +31,20 @@ runs, as it does on the machine with the switch set to RPU.
 
 ## Your game
 
+The quick way: export the hex (step 1), then let the setup script do steps 2 and 3. It copies your game into the
+`rpu` folder, writes its `.txt`, copies your WAVs, and makes a copy of the table set to run your game, beside it as
+`<table> (rpu_<game>).vpx`:
+
+```
+powershell -ExecutionPolicy Bypass -File add-game.ps1 MyGame.ino.hex mygame startreb -Sounds C:\MyGame\sounds -Table "C:\Tables\Star Trek (Bally 1979).vpx"
+tools/add-game.sh MyGame.ino.hex mygame startreb --sounds ~/MyGame/sounds --table ~/Tables/"Star Trek (Bally 1979).vpx"
+```
+
+`-Rev` (Mac: a number after the machine) sets your board rev when it isn't the default. After a new export, run it
+again without the table: it replaces the hex and keeps the game's settings (its EEPROM).
+
+By hand:
+
 1. In the Arduino IDE: **Sketch → Export Compiled Binary**. Take `<sketch>.ino.hex` (not the `with_bootloader` one).
 2. Put it in the `rpu` folder beside `VPinMAME64.dll` (Mac: `~/.pinmame/rpu/`) as `rpu_<game>.hex`, with
    `rpu_<game>.txt` (the two lines above) and your WAVs in `rpu\<game>\` (`001_name.wav`, …).
@@ -66,7 +80,7 @@ both, the `.hex` wins.
 - `pinmame-rpu.patch`: the RPU driver (`src/wpc/rpu.c`) against PinMAME at `PINMAME_BASE`.
 - `avr/`: `rpu_avr`, the emulated Mega and the bus bridge (simavr at `avr/SIMAVR_BASE`), and its WAV Trigger.
 - `plugin/`: the interfaces (`rpu_avr.h`, `rpu_plugin.h`) and the compiled plugin's rpu-sim glue.
-- `tools/`: `install-vpx-macos.sh`, `pmtest.cpp` (a game in libpinmame with no table), `plugtest.c`.
+- `tools/`: `add-game.ps1` / `add-game.sh` (the setup script), `install-vpx-macos.sh`, `pmtest.cpp` (a game in libpinmame with no table), `plugtest.c`.
 - `docs/hex-design.md`: how the `.hex` version works.
 - `.github/workflows/vpinmame.yml`: builds `VPinMAME64.dll` and `rpu_avr.dll`.
 
