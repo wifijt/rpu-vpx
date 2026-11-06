@@ -129,7 +129,7 @@ static int wt_load(int n) {
 }
 
 /*-- replies --*/
-static void send(const uint8_t *m, int n) {        /* m: cmd + data */
+static void wt_send(const uint8_t *m, int n) {        /* m: cmd + data */
   int i;
   if (!sendByte) return;
   sendByte(0xF0); sendByte(0xAA); sendByte((uint8_t)(n + 4));
@@ -141,7 +141,7 @@ static void report(int v, int playing) {
   int t = voice[v].track - 1;                    /* the real WAV Trigger reports tracks from 0 */
   if (!reporting) return;
   m[0] = 0x84; m[1] = (uint8_t)t; m[2] = (uint8_t)(t >> 8); m[3] = (uint8_t)v; m[4] = (uint8_t)playing;
-  send(m, 5);
+  wt_send(m, 5);
 }
 
 /*-- voices --*/
@@ -210,13 +210,13 @@ static void command(const uint8_t *m, int n) {
     case 0x01: {                                                    /* get version */
       uint8_t r[21] = {0x81};
       memcpy(r + 1, "WAV Trigger v1.34   ", 20);
-      send(r, 21);
+      wt_send(r, 21);
       break;
     }
     case 0x02: {                                                    /* get system info */
       int c = wt_count();
       uint8_t r[4] = {0x82, VOICES, (uint8_t)c, (uint8_t)(c >> 8)};
-      send(r, 4);
+      wt_send(r, 4);
       break;
     }
     case 0x03: if (n >= 4) track_control(m[1], le16(m + 2), 0); break;
@@ -229,7 +229,7 @@ static void command(const uint8_t *m, int n) {
       r[0] = 0x83;
       for (v = 0; v < VOICES; v++)
         if (voice[v].track && !voice[v].paused) { r[k++] = (uint8_t)voice[v].track; r[k++] = (uint8_t)(voice[v].track >> 8); }
-      send(r, k);
+      wt_send(r, k);
       break;
     }
     case 0x08: if (n >= 5) each_voice_of(le16(m + 1), v_gain, (int16_t)le16(m + 3)); break;
